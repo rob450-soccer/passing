@@ -50,6 +50,22 @@ EOF
 chmod a+x "${DIST_DIR}/start.sh"
 chmod a+x "${DIST_DIR}/kill.sh"
 
+#TEMPORARY!
+echo "Creating start3v3.sh..."
+cat > "${DIST_DIR}/start3v3.sh" << EOF
+#!/bin/bash
+export OMP_NUM_THREADS=1
+
+host=\${1:-localhost}
+port=\${2:-60000}
+
+for i in {1..3}; do
+  ./$(echo "${TEAM_NAME,,}") -t ${TEAM_NAME} -f hl_adult -n \$i --host \$host --port \$port &
+done
+EOF
+
+chmod a+x "${DIST_DIR}/start3v3.sh"
+
 echo "Packing into ${BUILD_DIR}/${TEAM_NAME}.tar.gz..."
 tar -czf "${BUILD_DIR}/${TEAM_NAME}.tar.gz" -C "$DIST_DIR" . --transform "s|^|${TEAM_NAME}/|"
 

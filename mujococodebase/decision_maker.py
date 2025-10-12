@@ -12,6 +12,13 @@ logger = logging.getLogger()
 
 
 class DecisionMaker:
+    """
+    Responsible for deciding what the agent should do at each moment.
+
+    This class is called every simulation step to update the agent's behavior
+    based on the current state of the world and game conditions.
+    """
+
     BEAM_POSES: Mapping[type[Field], Mapping[int, tuple[float, float, float]]] ={
         FIFAField: {
             1: (2.1, 0, 0),
@@ -34,6 +41,12 @@ class DecisionMaker:
     } 
 
     def __init__(self, agent):
+        """
+        Creates a new DecisionMaker linked to the given agent.
+
+        Args:
+            agent: The main agent that owns this DecisionMaker.
+        """
         from mujococodebase.agent import Agent  # type hinting
 
         self.agent: Agent = agent
@@ -41,8 +54,10 @@ class DecisionMaker:
 
     def update_current_behavior(self) -> None:
         """
-        @brief Updates current behavior and executes desired skill,
-        considering all play modes and game contexts.
+        Chooses what the agent should do in the current step.
+
+        This function checks the game state and decides which behavior
+        or skill should be executed next.
         """
 
         if self.agent.world.playmode is PlayModeEnum.GAME_OVER:
@@ -70,6 +85,9 @@ class DecisionMaker:
         self.agent.robot.commit_motor_targets_pd()
 
     def carry_ball(self):
+        """
+        Basic example of a behavior: moves the robot toward the goal while handling the ball.
+        """
         their_goal_pos = self.agent.world.field.get_their_goal_position()[:2]
         ball_pos = self.agent.world.ball_pos[:2]
         my_pos = self.agent.world.global_position[:2]

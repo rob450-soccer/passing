@@ -5,9 +5,25 @@ from mujococodebase.world.field import FIFAField, HLAdultField
 from mujococodebase.world.play_mode import PlayModeEnum, PlayModeGroupEnum
 
 class World:
+    """
+    Represents the current simulation world, containing all relevant
+    information about the environment, the ball, and the robots.
+    """
+
     MAX_PLAYERS_PER_TEAM = 11
     
     def __init__(self, agent, team_name: str, number: int, field_name: str):
+        """
+        Initializes the world state.
+
+        Args:
+            agent: Reference to the agent that owns this world.
+            team_name (str): The name of the agent's team.
+            number (int): The player's number within the team.
+            field_name (str): The name of the field to initialize
+                              (e.g., 'fifa' or 'hl_adult').
+        """
+        
         from mujococodebase.agent import Agent  # type hinting
 
         self.agent: Agent = agent
@@ -31,6 +47,9 @@ class World:
         self.field: Field = self.__initialize_field(field_name=field_name)
 
     def update(self) -> None:
+        """
+        Updates the world state
+        """
         self.playmode_group = PlayModeGroupEnum.get_group_from_playmode(
             playmode=self.playmode, is_left_team=self.is_left_team
         )

@@ -1,13 +1,23 @@
 from abc import ABC, abstractmethod
-import math
-
+from typing import override
 import numpy as np
-from overrides import overrides
 from mujococodebase.server import Server
 
 
 class Robot(ABC):
+    """
+    Base class for all robot models.
+
+    This class defines the main structure and common data used by any robot,
+    such as motor positions, sensors, and control messages.
+    """
     def __init__(self, agent):
+        """
+        Creates a new robot linked to the given agent.
+
+        Args:
+            agent: The main agent that owns this robot.
+        """
         from mujococodebase.agent import Agent  # type hinting
 
         self.agent: Agent = agent
@@ -18,9 +28,9 @@ class Robot(ABC):
             for motor in self.ROBOT_MOTORS
         }
 
-        self.motor_positions: dict = {motor: 0.0 for motor in self.ROBOT_MOTORS}  # rad
+        self.motor_positions: dict = {motor: 0.0 for motor in self.ROBOT_MOTORS}  # degrees
 
-        self.motor_speeds: dict = {motor: 0.0 for motor in self.ROBOT_MOTORS}  # rad/s
+        self.motor_speeds: dict = {motor: 0.0 for motor in self.ROBOT_MOTORS}  # degrees/s
 
         self._global_cheat_orientation = np.array([0, 0, 0, 1])  # quaternion [x, y, z, w]
 
@@ -28,25 +38,38 @@ class Robot(ABC):
 
         self.global_orientation_euler = np.zeros(3) # euler [roll, pitch, yaw]
 
-        self.gyroscope = np.zeros(3)  # angular velocity [roll, pitch, yaw] (rad/s)
+        self.gyroscope = np.zeros(3)  # angular velocity [roll, pitch, yaw] (degrees/s)
 
         self.accelerometer = np.zeros(3)  # linear acceleration [x, y, z] (m/s²)
 
     @property
     @abstractmethod
     def name(self) -> str:
+        """
+        Returns the robot model name.
+        """
         raise NotImplementedError()
 
     @property
     @abstractmethod
     def ROBOT_MOTORS(self) -> tuple[str, ...]:
+        """
+        Returns the list of motor names used by this robot.
+        """
         raise NotImplementedError()
 
     def set_motor_target_position(
         self, motor_name: str, target_position: float, kp: float = 10, kd: float = 0.1
     ) -> None:
         """
+        Sets the desired position and PD gains for a given motor.
+
         For now, directly sets positions, as the simulator is doing the control
+        Args:
+            motor_name: Name of the motor.
+            target_position: Desired position in radians.
+            kp: Proportional gain.
+            kd: Derivative gain.
         """
         self.motor_targets[motor_name] = {
             "target_position": target_position,
@@ -55,13 +78,19 @@ class Robot(ABC):
         }
 
     def commit_motor_targets_pd(self) -> None:
+        """
+        Sends all motor target commands to the simulator.
+        """
         for motor_name, target_description in self.motor_targets.items():
             motor_msg = f"({motor_name} {target_description["target_position"]:.2f} 0.0 {target_description["kp"]:.2f} {target_description["kd"]:.2f} 0.0)"
             self.server.commit(motor_msg)
 
 
 class T1(Robot):
-    @overrides
+    """
+    Booster T1
+    """
+    @override
     def __init__(self, agent):
         super().__init__(agent)
 
@@ -94,12 +123,12 @@ class T1(Robot):
         )
 
     @property
-    @overrides
+    @override
     def name(self) -> str:
         return "T1"
 
     @property
-    @overrides
+    @override
     def ROBOT_MOTORS(self) -> tuple[str, ...]:
         return (
             "he1",
@@ -129,6 +158,9 @@ class T1(Robot):
 
     @property
     def MOTOR_FROM_READABLE_TO_SERVER(self) -> dict:
+        """
+        Maps readable joint names to their simulator motor codes.
+        """
         return {
             "Head_yaw": "he1",
             "Head_pitch": "he2",
@@ -157,6 +189,13 @@ class T1(Robot):
 
     @property
     def MOTOR_SYMMETRY(self) -> list[str, bool]:
+        """
+        Defines pairs of symmetric motors and whether their direction is inverted.
+
+        Returns:
+            A dictionary where each key is a logical joint group name,
+            and the value is a tuple (motor_names, inverted).
+        """
         return {
             "Head_yaw": (("Head_yaw",), False),
             "Head_pitch": (("Head_pitch",), False),
