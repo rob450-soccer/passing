@@ -80,8 +80,27 @@ CLI parameter:
 - `[host]` Server IP address (default: 'localhost')
 - `[port]` Server port for agents (default: 60000)
 
+### Binary building
+To compete, a binary is needed. It provides a compact, portable version and protects the source code. To create a binary, just run the script ```build_binary.sh```
+
+```bash
+./build_binary.sh <team-name>
+```
+
+Using **Hatch**:
+```bash
+hatch run ./build_binary.sh <team-name>
+```
+
+Using **Poetry**:
+```bash
+poetry run ./build_binary.sh <team-name>
+```
+
+Once binary generation is finished, the result will be inside the build folder, as ```<team-name>.tar.gz```
+
 ### Brazil Open Mujoco Demo
-In the Brazil Open Mujoco Demo, the adult humanoid field will be used, with 3 players in each team. The start3v3.sh script can be used for that purpose.
+In the Brazil Open Mujoco Demo, the adult humanoid field will be used, with 3 players in each team. The ```start3v3.sh``` script can be used for that purpose.
 
 ### Authors and acknowledgment
 This project was developed and contributed by:
