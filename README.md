@@ -62,17 +62,17 @@ CLI parameter (a usage help is also available):
 You can also use a shell script to start the entire team, optionally specifying host and port:
 
 ```bash
-./run_team.sh [host] [port]
+./start.sh [host] [port]
 ```
 
 Using **Hatch**:
 ```bash
-hatch run ./run_team.sh [host] [port]
+hatch run ./start.sh [host] [port]
 ```
 
 Using **Poetry**:
 ```bash
-poetry run ./run_team.sh [host] [port]
+poetry run ./start.sh [host] [port]
 ```
 
 CLI parameter:
