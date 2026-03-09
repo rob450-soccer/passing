@@ -17,7 +17,11 @@ class Agent:
         number: int = 1,
         host: str = "localhost",
         port: int = 60000,
+<<<<<<< HEAD
         field: str = 'fifa'
+=======
+        field: str = 'hl_adult'
+>>>>>>> temp/main
     ):
         """
         Initializes the agent and all its main components.

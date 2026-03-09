@@ -31,8 +31,17 @@ class Server:
         logger.info(f"Server connection established to {self.__host}:{self.__port}.")
 
     def shutdown(self) -> None:
+<<<<<<< HEAD
         self.__socket.close()
         self.__socket.shutdown(socket.SHUT_RDWR)
+=======
+        try:
+            self.__socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            self.__socket.close()
+>>>>>>> temp/main
 
     def send_immediate(self, msg: str) -> None:
         """

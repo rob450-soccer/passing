@@ -1,5 +1,9 @@
 from dataclasses import Field
 import logging
+<<<<<<< HEAD
+=======
+import os
+>>>>>>> temp/main
 from typing import Mapping
 
 import numpy as np
@@ -19,7 +23,11 @@ class DecisionMaker:
     based on the current state of the world and game conditions.
     """
 
+<<<<<<< HEAD
     BEAM_POSES: Mapping[type[Field], Mapping[int, tuple[float, float, float]]] ={
+=======
+    BEAM_POSES: Mapping[type[Field], Mapping[int, tuple[float, float, float]]] = {
+>>>>>>> temp/main
         FIFAField: {
             1: (2.1, 0, 0),
             2: (22.0, 12.0, 0),
@@ -52,6 +60,31 @@ class DecisionMaker:
         self.agent: Agent = agent
         self.is_getting_up: bool = False
 
+<<<<<<< HEAD
+=======
+        # Optional per-player custom beam pose (x, y, rot_deg), typically set
+        # via environment variables by the player launcher.
+        self.custom_beam_pose: tuple[float, float, float] | None = self._load_custom_beam_pose()
+
+    def _load_custom_beam_pose(self) -> tuple[float, float, float] | None:
+        x_str = os.getenv("PLAYER_SPAWN_X")
+        y_str = os.getenv("PLAYER_SPAWN_Y")
+        rot_str = os.getenv("PLAYER_SPAWN_ROT")
+
+        if x_str is None or y_str is None or rot_str is None:
+            return None
+
+        try:
+            x = float(x_str)
+            y = float(y_str)
+            rot = float(rot_str)
+        except ValueError:
+            logger.warning("Invalid PLAYER_SPAWN_* environment variables; ignoring custom beam pose.")
+            return None
+
+        return (x, y, rot)
+
+>>>>>>> temp/main
     def update_current_behavior(self) -> None:
         """
         Chooses what the agent should do in the current step.
@@ -67,9 +100,23 @@ class DecisionMaker:
             PlayModeGroupEnum.ACTIVE_BEAM,
             PlayModeGroupEnum.PASSIVE_BEAM,
         ):
+<<<<<<< HEAD
             self.agent.server.commit_beam(
                 pos2d=self.BEAM_POSES[type(self.agent.world.field)][self.agent.world.number][:2],
                 rotation=self.BEAM_POSES[type(self.agent.world.field)][self.agent.world.number][2],
+=======
+            if self.custom_beam_pose is not None:
+                pos2d = self.custom_beam_pose[:2]
+                rotation = self.custom_beam_pose[2]
+            else:
+                default_pose = self.BEAM_POSES[type(self.agent.world.field)][self.agent.world.number]
+                pos2d = default_pose[:2]
+                rotation = default_pose[2]
+
+            self.agent.server.commit_beam(
+                pos2d=pos2d,
+                rotation=rotation,
+>>>>>>> temp/main
             )
 
         if self.is_getting_up or self.agent.skills_manager.is_ready(skill_name="GetUp"):
