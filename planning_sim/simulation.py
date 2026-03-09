@@ -1,6 +1,7 @@
 import pygame
 import sys
 from test_astar import thetastar
+from astar import GridWorld
 
 # --- Configuration & Constants ---
 WIDTH, HEIGHT = 800, 800
@@ -19,17 +20,18 @@ BLUE = (52, 152, 219)
 def main():
     pygame.init()
     win = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("A* Simulation (Draw Walls: Left Click | Erase: Right Click)")
+    pygame.display.set_caption("Theta* Pathfinding Simulation (Draw Walls: Left Click | Erase: Right Click)")
     clock = pygame.time.Clock()
 
-    # 0 = Empty, 1 = Obstacle
-    grid = [[0 for _ in range(COLS)] for _ in range(ROWS)]
+    # Track the raw user inputs (0 = Empty, 1 = Obstacle)
+    raw_grid = [[0 for _ in range(COLS)] for _ in range(ROWS)]
+    grid_world = GridWorld(raw_grid)
     
     start_pos = (5, 5)
     end_pos = (ROWS - 6, COLS - 6)
     
     # State tracking
-    path = thetastar(grid, start_pos, end_pos)
+    path = thetastar(grid_world._grid.tolist(), start_pos, end_pos)
     dragging_start = False
     dragging_end = False
 
@@ -61,36 +63,39 @@ def main():
         row, col = min(max(y // CELL_HEIGHT, 0), ROWS - 1), min(max(x // CELL_WIDTH, 0), COLS - 1)
         grid_changed = False
 
-        if dragging_start and grid[row][col] == 0 and (row, col) != end_pos:
+        if dragging_start and grid_world.is_free([row, col]) and (row, col) != end_pos:
             start_pos = (row, col)
             grid_changed = True
-        elif dragging_end and grid[row][col] == 0 and (row, col) != start_pos:
+        elif dragging_end and grid_world.is_free([row, col]) and (row, col) != start_pos:
             end_pos = (row, col)
             grid_changed = True
         else:
             # Drawing and erasing walls
             left_click, _, right_click = pygame.mouse.get_pressed()
             if left_click and not dragging_start and not dragging_end:
-                if (row, col) != start_pos and (row, col) != end_pos and grid[row][col] == 0:
-                    grid[row][col] = 1
+                if (row, col) != start_pos and (row, col) != end_pos and raw_grid[row][col] != 1:
+                    raw_grid[row][col] = 1
                     grid_changed = True
             elif right_click:
-                if grid[row][col] == 1:
-                    grid[row][col] = 0
+                if raw_grid[row][col] != 0:
+                    raw_grid[row][col] = 0
                     grid_changed = True
 
         # Only recalculate the path if the grid/positions actually updated
         if grid_changed:
-            path = thetastar(grid, start_pos, end_pos)
+            grid_world.update_grid(raw_grid)
+            path = thetastar(grid_world._grid.tolist(), start_pos, end_pos)
 
         # 3. Rendering
         win.fill(WHITE)
 
-        # Draw Obstacles
+        # Draw Obstacles and Inflation Layer
         for r in range(ROWS):
             for c in range(COLS):
-                if grid[r][c] == 1:
+                if grid_world.is_obstacle([r, c]):
                     pygame.draw.rect(win, BLACK, (c * CELL_WIDTH, r * CELL_HEIGHT, CELL_WIDTH, CELL_HEIGHT))
+                elif grid_world.is_inflation([r, c]):
+                    pygame.draw.rect(win, GRAY, (c * CELL_WIDTH, r * CELL_HEIGHT, CELL_WIDTH, CELL_HEIGHT))
 
         # Draw Grid Lines
         for r in range(ROWS):
