@@ -1,6 +1,7 @@
 from dataclasses import Field
 import logging
 import os
+import random
 from enum import Enum
 from typing import Mapping
 
@@ -8,6 +9,7 @@ import numpy as np
 from mujococodebase.utils.math_ops import MathOps
 from mujococodebase.world.field import FIFAField, HLAdultField
 from mujococodebase.world.play_mode import PlayModeEnum, PlayModeGroupEnum
+
 
 logger = logging.getLogger()
 
@@ -22,33 +24,10 @@ class State(Enum):
 
 class DecisionMaker:
 
-    BEAM_POSES: Mapping[type, Mapping[int, tuple[float, float, float]]] = {
-        FIFAField: {
-            1: (2.1, 0, 0),
-            2: (22.0, 12.0, 0),
-            3: (22.0, 4.0, 0),
-            4: (22.0, -4.0, 0),
-            5: (22.0, -12.0, 0),
-            6: (15.0, 0.0, 0),
-            7: (4.0, 16.0, 0),
-            8: (11.0, 6.0, 0),
-            9: (11.0, -6.0, 0),
-            10: (4.0, -16.0, 0),
-            11: (7.0, 0.0, 0),
-        },
-        HLAdultField: {
-            1: (7.0, 0.0, 0),
-            2: (2.0, -1.5, 0),
-            3: (2.0, 1.5, 0),
-        }
-    }
-
     def __init__(self, agent):
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
-        self.custom_beam_pose = self._load_custom_beam_pose()
-
-        # FSM
+        self.beam_pose = self._get_beam_pose(True)
         self._current_state = State.NEUTRAL
 
     # --------------------------------------------------
@@ -120,13 +99,11 @@ class DecisionMaker:
             self._enter_state(State.NEUTRAL)
             return
 
-        if self.custom_beam_pose is not None:
-            pos2d = self.custom_beam_pose[:2]
-            rotation = self.custom_beam_pose[2]
+        if self.beam_pose is not None:
+            pos2d = self.beam_pose[:2]
+            rotation = self.beam_pose[2]
         else:
-            default_pose = self.BEAM_POSES[type(self.agent.world.field)][self.agent.world.number]
-            pos2d = default_pose[:2]
-            rotation = default_pose[2]
+            logger.warning("No valid beam pose generated before beam state reached.")
 
         self.agent.server.commit_beam(pos2d=pos2d, rotation=rotation)
 
@@ -139,7 +116,7 @@ class DecisionMaker:
         self.agent.skills_manager.execute("Neutral")
 
     def _state_go_to_ball(self):
-        # Exit → DRIBBLE if aligned and behind ball
+        # Exit: DRIBBLE if aligned and behind ball
 
         aligned, behind_ball, carry_pos, goal_pos, desired_orientation = self._compute_ball_geometry()
 
@@ -158,7 +135,7 @@ class DecisionMaker:
         )
 
     def _state_dribble(self):
-        # Exit → GO_TO_BALL if alignment lost
+        # Exit: GO_TO_BALL if alignment lost
 
         aligned, behind_ball, _, goal_pos, desired_orientation = self._compute_ball_geometry()
 
@@ -236,14 +213,53 @@ class DecisionMaker:
 
         return aligned, behind_ball, carry_ball_pos, their_goal_pos, desired_orientation
 
-    def _load_custom_beam_pose(self):
+    def _get_beam_pose(self, random_poses: bool):
+        """
+        Returns the beam pose (x, y, rotation_deg) for this agent.
+
+        Priority order:
+            1. Custom pose from PLAYER_SPAWN_X/Y/ROT environment variables.
+            2. Random pose within predefined zones (if random_poses=True).
+            3. Fixed default pose based on agent number.
+
+        Falls back to origin (0, 0, 0) if an unsupported configuration is
+        encountered, logging a warning in each case.
+
+        Args:
+            random_poses: If True, randomise spawn position within each agent's designated zone.
+
+        Returns:
+            A (x, y, rotation_deg) tuple representing the beam pose.
+        """
+
+        # 1. Custom pose takes priority over everything else.
         x = os.getenv("PLAYER_SPAWN_X")
         y = os.getenv("PLAYER_SPAWN_Y")
         r = os.getenv("PLAYER_SPAWN_ROT")
-        if x is None or y is None or r is None:
-            return None
-        try:
-            return (float(x), float(y), float(r))
-        except ValueError:
-            logger.warning("Invalid PLAYER_SPAWN_* environment variables; ignoring custom beam pose.")
-            return None
+        if x is not None and y is not None and r is not None:
+            try:
+                return (float(x), float(y), float(r))
+            except ValueError:
+                logger.warning("Invalid default pose variables; falling back to origin.")
+                return (0.0, 0.0, 0.0)
+    
+        # 2. Random pose within each agent's designated spawn zone.
+        if random_poses:
+            if self.agent.world.number == 1:
+                return (random.uniform(0, 6), random.uniform(0.5, 4), 0)
+            elif self.agent.world.number == 2:
+                return (random.uniform(0, 6), random.uniform(-0.5, -4), 0)
+            else:
+                logger.warning("Agent has no random spawn zone defined; falling back to origin.")
+                return (0.0, 0.0, 0.0)
+        
+        # 3. Fixed default poses.
+        if self.agent.world.number == 1:
+            return (7.0, 0.0, 0)
+        elif self.agent.world.number == 2:
+            return (2.0, -1.5, 0)
+        elif self.agent.world.number == 3:
+            return (2.0, 1.5, 0)
+        else:
+            logger.warning("Agent has no default pose defined; falling back to origin.")
+            return (0.0, 0.0, 0.0)
