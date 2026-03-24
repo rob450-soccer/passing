@@ -7,9 +7,13 @@ import numpy as np
 from mujococodebase.utils.math_ops import MathOps
 from mujococodebase.world.field import FIFAField, HLAdultField
 from mujococodebase.world.play_mode import PlayModeEnum, PlayModeGroupEnum
+from mujococodebase.world.grid_world import GridWorld
+from mujococodebase.world.planning import ana_theta_star as planner
+from mujococodebase.world.other_robot import OtherRobot
 
 
-logger = logging.getLogger()
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__file__)
 
 
 class DecisionMaker:
@@ -56,6 +60,12 @@ class DecisionMaker:
         # Optional per-player custom beam pose (x, y, rot_deg), typically set
         # via environment variables by the player launcher.
         self.custom_beam_pose: tuple[float, float, float] | None = self._load_custom_beam_pose()
+
+        # configuration for planning
+        self.ball_to_goal_path = None
+        self.robot_to_ball_path = None
+        self.current_robot_to_ball_path_step = 0
+
 
     def _load_custom_beam_pose(self) -> tuple[float, float, float] | None:
         x_str = os.getenv("PLAYER_SPAWN_X")
@@ -107,13 +117,97 @@ class DecisionMaker:
             self.is_getting_up = not self.agent.skills_manager.execute(skill_name="GetUp")
 
         elif self.agent.world.playmode is PlayModeEnum.PLAY_ON:
-            self.carry_ball()
+            self.play()
         elif self.agent.world.playmode in (PlayModeEnum.BEFORE_KICK_OFF, PlayModeEnum.THEIR_GOAL, PlayModeEnum.OUR_GOAL):
             self.agent.skills_manager.execute("Neutral")
         else:
-            self.carry_ball()
+            self.play()
 
         self.agent.robot.commit_motor_targets_pd()
+    
+    def play(self):
+        """
+        Behavior of robot during the game.
+        """
+        # plan paths if necessary
+        self.update_grid_world()
+        self.plan_paths()
+        
+        # TODO: plan paths for robots to future locations on path to goal so they can receive passes (put in plan_paths())
+
+        # if path planning is incomplete, wait
+        if self.ball_to_goal_path is None or self.robot_to_ball_path is None:
+            self.agent.skills_manager.execute("Neutral")
+            logger.info("Waiting for path planning...")
+            return
+        
+        # follow robot-to-ball path
+        target_location = np.array(self.robot_to_ball_path[self.current_robot_to_ball_path_step], dtype=float) / self.grid_scale
+        # TODO: add orientation
+        target_orientation = None
+        self.agent.skills_manager.execute(
+            "Walk",
+            target_2d=target_location,
+            is_target_absolute=True,
+            orientation=target_orientation
+        )
+        logger.debug(f"Walking to {target_location}")
+
+        # TODO: check if we've arrived and should head to the next waypoint
+
+
+    def plan_paths(self):
+        """
+        Plan any empty paths.
+        """
+        if self.ball_to_goal_path is None:
+            self.ball_to_goal_path = planner(self.grid_world, self.ball_grid_pos, 
+                                             self.goal_grid_pos, self.ball_to_goal_path)
+        if self.robot_to_ball_path is None:
+            self.robot_to_ball_path = planner(self.grid_world, self.agent_grid_pos, 
+                                              self.ball_grid_pos, self.robot_to_ball_path)
+
+
+    def update_grid_world(self) -> dict:
+        """
+        Convert the simulation world to a grid world for planning purposes.
+        """
+        # each grid cell will represent 10cm
+        self.grid_scale: int = 10
+        self.grid_world: GridWorld = GridWorld(
+            self.agent.world.field.get_length() * self.grid_scale, 
+            self.agent.world.field.get_width() * self.grid_scale
+        )
+        
+        # add obstacle locations
+        obstacles: list[OtherRobot] = self.agent.world.their_team_players
+        obstacles: np.ndarray[float] = [robot.position for robot in obstacles]
+        for pos in obstacles:
+            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]))
+
+        # convert location of line in front of the goal to grid coordinates
+        goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
+        goal_width = abs(self.agent.world.field.field_landmarks.landmarks["g_lup"][1] 
+                         - self.agent.world.field.field_landmarks.landmarks["g_llp"][1])
+        offsets = np.array(range(
+            round((goal_world_pos[1] - goal_width/2) * self.grid_scale), 
+            round((goal_world_pos[1] + goal_width/2) * self.grid_scale)
+        ))
+        x = round(goal_world_pos[0] * self.grid_scale)
+        y = np.round(goal_world_pos[1] * self.grid_scale + offsets)
+        self.goal_grid_pos = np.column_stack((np.full(len(offsets), x), y))
+
+        # convert location of ball to grid coordinates
+        ball_world_pos = self.agent.world.ball_pos[:2]
+        self.ball_grid_pos = np.array([round(ball_world_pos[0] * self.grid_scale), 
+                              round(ball_world_pos[1] * self.grid_scale)])
+
+        # convert location of agent to grid coordinates
+        agent_world_pos = self.agent.world.global_position[:2] # NOTE: global_position[2] is used for detecting falls and is NOT the 2D orientation
+        self.agent_grid_pos = np.array([round(agent_world_pos[0] * self.grid_scale), 
+                               round(agent_world_pos[1] * self.grid_scale)])
+        # TODO: add orientation information
+
 
     def carry_ball(self):
         """

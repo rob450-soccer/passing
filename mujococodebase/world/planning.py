@@ -1,15 +1,16 @@
 import heapq
+import numpy as np
 
-from grid_world import GridWorld, Node
+from mujococodebase.world.grid_world import GridWorld, Node
 
-def distance_to_goal(start: Node, goal: tuple[int] | list[tuple[int]]) -> float:
+def distance_to_goal(start: Node, goal: np.ndarray[int]) -> float:
     """Get the distance to the goal, whether the goal is a single point or multiple."""
-    if isinstance(goal, tuple):
-        return start.distance_to(Node(goal))
-    return min(start.distance_to(Node(goal_pt)) for goal_pt in goal)
+    if goal.ndim == 1:
+        return np.linalg.norm(start.location - goal)
+    return np.min(np.linalg.norm(start.location - goal, axis=1))
 
 
-def a_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[int]]) -> list[tuple[int]] | None:
+def a_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int]) -> list[np.ndarray[int]] | None:
     """The classic."""
     # setup
     start_node = Node(start)
@@ -19,7 +20,7 @@ def a_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[in
 
     open = [start_node]
     heapq.heapify(open)
-    g_scores = {start: 0}
+    g_scores = {start_node: 0}
 
     # finding the path
     while len(open) > 0:
@@ -42,11 +43,11 @@ def a_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[in
             # take the node if it introduces a shorter path
             neighbor_node = Node(neighbor, current_node)
             g = current_node.g + current_node.distance_to(neighbor_node)
-            if g < g_scores.get(neighbor, float("inf")):
+            if g < g_scores.get(neighbor_node, float("inf")):
                 neighbor_node.g = g
                 neighbor_node.h = distance_to_goal(neighbor_node, goal)
                 neighbor_node.score = neighbor_node.g + neighbor_node.h
-                g_scores[neighbor] = g
+                g_scores[neighbor_node] = g
 
                 heapq.heappush(open, neighbor_node)
 
@@ -54,7 +55,7 @@ def a_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[in
     return None
 
 
-def theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[int]]) -> list[tuple[int]] | None:
+def theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int]) -> list[np.ndarray[int]] | None:
     """Calculates any-angle paths for more realistic and efficient movement."""
     # setup
     start_node = Node(start)
@@ -65,7 +66,7 @@ def theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tupl
 
     open = [start_node]
     heapq.heapify(open)
-    g_scores = {start: 0}
+    g_scores = {start_node: 0}
 
     # finding the path
     while len(open) > 0:
@@ -94,11 +95,11 @@ def theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tupl
             else:
                 g = current_node.g + current_node.distance_to(neighbor_node)
             
-            if g < g_scores.get(neighbor, float("inf")):
+            if g < g_scores.get(neighbor_node, float("inf")):
                 neighbor_node.g = g
                 neighbor_node.h = distance_to_goal(neighbor_node, goal)
                 neighbor_node.score = neighbor_node.g + neighbor_node.h
-                g_scores[neighbor] = g
+                g_scores[neighbor_node] = g
 
                 heapq.heappush(open, neighbor_node)
 
@@ -106,18 +107,18 @@ def theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tupl
     return None
 
 
-def ana_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[int]], current_path: list[tuple[int]]) -> list[tuple[int]] | None:
+def ana_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int], current_path: list[np.ndarray[int]]) -> list[np.ndarray[int]] | None:
     """
     Anytime variant that makes progressively better paths if time is a limiting factor.
     
     Args:
         world (GridWorld): representation of the map
-        start (tuple[int]): starting location to plan from
-        goal (tuple[int]): target location to plan to
-        current_path (list[tuple[int]]): a variable to store and get the current path
+        start (np.ndarray[int]): starting location to plan from
+        goal (np.ndarray[int]): target location to plan to
+        current_path (list[np.ndarray[int]]): a variable to store and get the current path
 
     Returns: 
-        path (list[tuple[int]]): the final best path found
+        path (list[np.ndarray[int]]): the final best path found
     """
     # setup
     start_node = Node(start)
@@ -130,7 +131,7 @@ def ana_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[
 
     open = [start_node]
     heapq.heapify(open)
-    g_scores = {start: 0}
+    g_scores = {start_node: 0}
 
     def e(node):
         if node.h == 0:
@@ -164,12 +165,12 @@ def ana_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[
                 # take the node if it introduces a shorter path
                 neighbor_node = Node(neighbor, current_node)
                 g = current_node.g + current_node.distance_to(neighbor_node)
-                if g < g_scores.get(neighbor, float("inf")):
+                if g < g_scores.get(neighbor_node, float("inf")):
                     neighbor_node.g = g
                     neighbor_node.h = distance_to_goal(neighbor_node, goal)
                     if neighbor_node.g + neighbor_node.h < G:
                         neighbor_node.score = e(neighbor_node)
-                        g_scores[neighbor] = g
+                        g_scores[neighbor_node] = g
                         heapq.heappush(open, neighbor_node)
 
     # finding the path
@@ -192,18 +193,18 @@ def ana_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[
     return current_path
 
 
-def ana_theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[tuple[int]], current_path: list[tuple[int]]) -> list[tuple[int]] | None:
+def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int], current_path: list[np.ndarray[int]]) -> list[np.ndarray[int]] | None:
     """
     Anytime variant that makes progressively better any-angle paths if time is a limiting factor.
     
     Args:
         world (GridWorld): representation of the map
-        start (tuple[int]): starting location to plan from
-        goal (tuple[int]): target location to plan to
-        current_path (list[tuple[int]]): a variable to store and get the current path
+        start (np.ndarray[int]): starting location to plan from
+        goal (np.ndarray[int]): target location to plan to
+        current_path (list[np.ndarray[int]]): a variable to store and get the current path
 
     Returns: 
-        path (list[tuple[int]]): the final best path found
+        path (list[np.ndarray[int]]): the final best path found
     """
     # setup
     start_node = Node(start)
@@ -216,7 +217,7 @@ def ana_theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[
 
     open = [start_node]
     heapq.heapify(open)
-    g_scores = {start: 0}
+    g_scores = {start_node: 0}
 
     def e(node):
         if node.h == 0:
@@ -233,7 +234,7 @@ def ana_theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[
                 E = current_node.score
 
             # check if we've reached the goal:
-            if (current_node.location in goal if isinstance(goal, list) else current_node.location == goal):
+            if np.any(np.all(current_node.location == np.atleast_2d(goal), axis=1)):
                 G = current_node.g
                 # reconstruct path
                 path = []
@@ -254,12 +255,12 @@ def ana_theta_star(world: GridWorld, start: tuple[int], goal: tuple[int] | list[
                     neighbor_node.parent = current_node.parent
                 else:
                     g = current_node.g + current_node.distance_to(neighbor_node)
-                if g < g_scores.get(neighbor, float("inf")):
+                if g < g_scores.get(neighbor_node, float("inf")):
                     neighbor_node.g = g
                     neighbor_node.h = distance_to_goal(neighbor_node, goal)
                     if neighbor_node.g + neighbor_node.h < G:
                         neighbor_node.score = e(neighbor_node)
-                        g_scores[neighbor] = g
+                        g_scores[neighbor_node] = g
                         heapq.heappush(open, neighbor_node)
 
     # finding the path

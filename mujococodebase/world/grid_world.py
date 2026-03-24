@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-import numpy
+import numpy as np
 
 
 class GridWorld:
@@ -11,8 +11,13 @@ class GridWorld:
     """
 
     def __init__(self, grid: list[list[int]]):
-        self._grid = numpy.array(grid, dtype=float)
+        self._grid = np.array(grid, dtype=float)
         self.inflate_obstacles()
+        self.height, self.width = self._grid.shape
+    
+    def __init__(self, width: int, height: int):
+        self._grid = np.zeros((width, height), dtype=float)
+        self.height, self.width = self._grid.shape
 
     def inflate_obstacles(self, inflation_amount: int = 2) -> None:
         """
@@ -32,28 +37,41 @@ class GridWorld:
                     ]
                     inflation_section[inflation_section == 0] = 0.5  # inflation_section is a view of self.grid
 
-    def neighbors(self, pos: tuple[int]) -> list[tuple[int]]:
+    def neighbors(self, pos: np.ndarray[int]) -> list[np.ndarray[int]]:
         """Get a list of the eight neighboring locations of the specified location."""
+        headings = [0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi, -3*np.pi/4, -np.pi/2, -np.pi/4]
+        positions = [
+            np.array([pos[0] + 1, pos[1]]),
+            np.array([pos[0] - 1, pos[1]]),
+            np.array([pos[0], pos[1] + 1]),
+            np.array([pos[0], pos[1] - 1]),
+            np.array([pos[0] + 1, pos[1] + 1]),
+            np.array([pos[0] + 1, pos[1] - 1]),
+            np.array([pos[0] - 1, pos[1] + 1]),
+            np.array([pos[0] - 1, pos[1] - 1])
+        ]
+
+        idx = 0
+        while idx < len(positions):
+            if positions[idx][0] < -self.width // 2 or positions[idx][0] > self.width // 2:
+                positions.pop(idx)
+            elif positions[idx][1] < -self.height // 2 or positions[idx][1] > self.height // 2:
+                positions.pop(idx)
+            else:
+                idx += 1
+        
+        if len(pos) == 2:
+            # no orientation information
+            return positions
+
+        # include orientation information
         neighbors = []
-        if pos[0] > 0:
-            neighbors.append((pos[0] - 1, pos[1]))
-            if pos[1] > 0:
-                neighbors.append((pos[0] - 1, pos[1] - 1))
-            if pos[1] < self._grid.shape[1] - 1:
-                neighbors.append((pos[0] - 1, pos[1] + 1))
-        if pos[0] < self._grid.shape[0] - 1:
-            neighbors.append((pos[0] + 1, pos[1]))
-            if pos[1] > 0:
-                neighbors.append((pos[0] + 1, pos[1] - 1))
-            if pos[1] < self._grid.shape[1] - 1:
-                neighbors.append((pos[0] + 1, pos[1] + 1))
-        if pos[1] > 0:
-            neighbors.append((pos[0], pos[1] - 1))
-        if pos[1] < self._grid.shape[1] - 1:
-            neighbors.append((pos[0], pos[1] + 1))
+        for p in positions:
+            for h in headings:
+                neighbors.append(np.array([p[0], p[1], h]))
         return neighbors
 
-    def line_of_sight(self, pos1: tuple[int], pos2: tuple[int]) -> bool:
+    def line_of_sight(self, pos1: np.ndarray[int], pos2: np.ndarray[int]) -> bool:
         """
         Checks line of sight using Bresenham's.
 
@@ -61,6 +79,8 @@ class GridWorld:
             pos1 (tuple[int]): Location of the starting cell of the line.
             pos2 (tuple[int]): Location of the ending cell of the line.
         """
+        pos1 = self._cartesian_to_array_index(pos1)
+        pos2 = self._cartesian_to_array_index(pos2)
         x0, y0 = pos1
         x1, y1 = pos2
         dx = abs(x1 - x0)
@@ -87,37 +107,58 @@ class GridWorld:
                 y0 += y_step
                 
         return True
+    
+    def _cartesian_to_array_index(self, pos: np.ndarray[int]) -> np.ndarray[int]:
+        """Convert from Cartesian coordinates to array indices."""
+        pos[0] += self.width // 2
+        pos[1] = self.height // 2 - pos[1]
+        return pos
 
     def update_grid(self, new_grid: list[list[int]]) -> None:
         """Update the map with new info."""
-        self._grid = numpy.array(new_grid, dtype=float)
+        self._grid = np.array(new_grid, dtype=float)
         self.inflate_obstacles()
 
-    def update_location(self, pos: tuple[int], value: float) -> None:
+    def update_location(self, pos: np.ndarray[int], value: float) -> None:
         """Update a specific cell of the map."""
+        pos = self._cartesian_to_array_index(pos)
         self._grid[pos[0], pos[1]] = value
+    
+    def add_obstacle(self, pos: np.ndarray[int], inflation_amount: int = 2) -> None:
+        """Add an obstacle and inflate the area around it."""
+        pos = self._cartesian_to_array_index(pos)
+        self._grid[pos[0], pos[1]] = 1
+        inflation_section = self._grid[
+            max(pos[0] - inflation_amount, 0) : min(pos[0] + inflation_amount + 1, self._grid.shape[0]),
+            max(pos[1] - inflation_amount, 0) : min(pos[1] + inflation_amount + 1, self._grid.shape[1]),
+        ]
+        inflation_section[inflation_section == 0] = 0.5
 
-    def is_occupied(self, pos: tuple[int]) -> bool:
+    def is_occupied(self, pos: np.ndarray[int]) -> bool:
         """Check if a cell of the map is occupied or not."""
+        pos = self._cartesian_to_array_index(pos)
         return self._grid[pos[0], pos[1]] > 0
 
-    def is_obstacle(self, pos: tuple[int]) -> bool:
+    def is_obstacle(self, pos: np.ndarray[int]) -> bool:
         """Check if a cell of the map is an obstacle or not."""
+        pos = self._cartesian_to_array_index(pos)
         return self._grid[pos[0], pos[1]] == 1
 
-    def is_inflation(self, pos: tuple[int]) -> bool:
+    def is_inflation(self, pos: np.ndarray[int]) -> bool:
         """Check if a cell of the map is partof the inflation layer or not."""
+        pos = self._cartesian_to_array_index(pos)
         return self._grid[pos[0], pos[1]] == 0.5
 
-    def is_free(self, pos: tuple[int]) -> bool:
+    def is_free(self, pos: np.ndarray[int]) -> bool:
         """Check if a cell of the map is free space or not."""
+        pos = self._cartesian_to_array_index(pos)
         return self._grid[pos[0], pos[1]] == 0
 
 
 class Node:
     """Node for an individual location."""
 
-    def __init__(self, location: tuple[int], parent: Node | None = None):
+    def __init__(self, location: np.ndarray[int], parent: Node | None = None):
         self.location = location
         self.parent = parent
         self.g = float("inf")
@@ -125,8 +166,22 @@ class Node:
         self.score = float("inf")
 
     def __lt__(self, other):
+        if not isinstance(other, Node):
+            return False
         return self.score < other.score
+
+    def __eq__(self, other):
+        if not isinstance(other, Node):
+            return False
+        return np.array_equal(self.location, other.location)
+
+    def __hash__(self):
+        return hash(tuple(self.location))
 
     def distance_to(self, other: Node) -> float:
         """Calculate Euclidean distance between two nodes."""
-        return math.hypot(self.location[0] - other.location[0], self.location[1] - other.location[1])
+        diff = np.abs(self.location - other.location)
+        if self.location.size == 3:
+            # Wrap-around logic: get the shortest angular distance
+            diff[2] = min(diff[2], 2 * np.pi - diff[2])
+        return float(np.linalg.norm(diff))
