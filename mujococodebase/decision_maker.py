@@ -152,7 +152,13 @@ class DecisionMaker:
         # if path planning is incomplete, wait
         if not self.path_ready_events["robot_to_ball"].is_set():
             self.agent.skills_manager.execute("Neutral")
-            logger.info("Waiting for path planning...")
+            logger.debug("Waiting for path planning...")
+            return
+        
+        # if path has been followed, wait
+        if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
+            self.agent.skills_manager.execute("Neutral")
+            logger.debug("Done following robot_to_ball path")
             return
         
         # follow robot-to-ball path
@@ -167,19 +173,18 @@ class DecisionMaker:
         )
         logger.debug(f"Walking to {target_location}")
 
-        # TODO: check if we've arrived and should head to the next waypoint
+        # check if we've arrived and should head to the next waypoint
+        agent_location = self.agent.world.global_position[:2]
+        agent_to_target = target_location - agent_location
+        PATH_COMPLETE_THRESHOLD = 0.1
+        if np.linalg.norm(agent_to_target) <= PATH_COMPLETE_THRESHOLD:
+            self.path_steps["robot_to_ball"] += 1
 
 
     def plan_paths(self):
         """
         Plan all necessary paths.
         """
-        # t = threading.Thread(
-        #     target=planner, 
-        #     args=(self.grid_world, self.ball_grid_pos, self.goal_grid_pos, self.ball_to_goal_path)
-        # )
-        # self.planning_threads.append(t)
-        # t.start()
         t = threading.Thread(
             target=planner, 
             args=(self.grid_world, self.agent_grid_pos, self.ball_grid_pos, "robot_to_ball", self.paths, self.path_ready_events)
