@@ -1,7 +1,11 @@
 import heapq
+import logging
 import numpy as np
 
 from mujococodebase.world.grid_world import GridWorld, Node
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__file__)
 
 def distance_to_goal(start: Node, goal: np.ndarray[int]) -> float:
     """Get the distance to the goal, whether the goal is a single point or multiple."""
@@ -193,7 +197,7 @@ def ana_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int], cu
     return current_path
 
 
-def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int], current_path: list[np.ndarray[int]]) -> list[np.ndarray[int]] | None:
+def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int], path_name: str, shared_paths: dict, shared_ready_events: dict) -> list[np.ndarray[int]] | None:
     """
     Anytime variant that makes progressively better any-angle paths if time is a limiting factor.
     
@@ -206,6 +210,7 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
     Returns: 
         path (list[np.ndarray[int]]): the final best path found
     """
+    logger.debug(f"planning with ana_theta_star() from {start} to {goal}")
     # setup
     start_node = Node(start)
     goal_node = Node(goal)
@@ -222,6 +227,8 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
     def e(node):
         if node.h == 0:
             return -float('inf')
+        if G == float('inf'):
+            return node.h
         return -1 * ((G - node.g) / node.h)
 
     def improve_solution():
@@ -268,16 +275,12 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
         new_path = improve_solution()
         if new_path is None:
             break
-        current_path[:] = new_path
+        shared_paths[path_name] = new_path
+        shared_ready_events[path_name].set()
         # prune nodes that cannot give a shorter path
-        i = 0
-        while i < len(open):
-            if open[i].g + open[i].h >= G:
-                open.pop(i)
-            else:
-                # recalculate
-                open[i].score = e(open[i])
-            i += 1
+        open = [node for node in open if node.g + node.h < G]
+        for node in open:
+            node.score = e(node)
         heapq.heapify(open)
 
-    return current_path
+    return shared_paths[path_name]

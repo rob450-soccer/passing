@@ -1,6 +1,7 @@
 from dataclasses import Field
 import logging
 import os
+import threading
 from typing import Mapping
 
 import numpy as np
@@ -61,11 +62,25 @@ class DecisionMaker:
         # via environment variables by the player launcher.
         self.custom_beam_pose: tuple[float, float, float] | None = self._load_custom_beam_pose()
 
-        # configuration for planning
-        self.ball_to_goal_path = None
-        self.robot_to_ball_path = None
-        self.current_robot_to_ball_path_step = 0
+        self.started = False
 
+        # configuration for planning
+        self.planning_threads = []
+        self.paths = {
+            "robot_to_ball": []
+        }
+        self.path_ready_events = {
+            "robot_to_ball": threading.Event()
+        }
+        self.path_steps = {
+            "robot_to_ball": 0
+        }
+
+    def start(self):
+        """Initialization tasks that require information from the server that isn't prseent when __init__() runs."""
+        self.started = True
+        self.create_grid_world()
+        self.plan_paths()
 
     def _load_custom_beam_pose(self) -> tuple[float, float, float] | None:
         x_str = os.getenv("PLAYER_SPAWN_X")
@@ -129,20 +144,19 @@ class DecisionMaker:
         """
         Behavior of robot during the game.
         """
-        # plan paths if necessary
-        self.update_grid_world()
-        self.plan_paths()
+        if not self.started:
+            self.start()
         
         # TODO: plan paths for robots to future locations on path to goal so they can receive passes (put in plan_paths())
 
         # if path planning is incomplete, wait
-        if self.ball_to_goal_path is None or self.robot_to_ball_path is None:
+        if not self.path_ready_events["robot_to_ball"].is_set():
             self.agent.skills_manager.execute("Neutral")
             logger.info("Waiting for path planning...")
             return
         
         # follow robot-to-ball path
-        target_location = np.array(self.robot_to_ball_path[self.current_robot_to_ball_path_step], dtype=float) / self.grid_scale
+        target_location = np.array(self.paths["robot_to_ball"][self.path_steps["robot_to_ball"]], dtype=float) / self.grid_scale
         # TODO: add orientation
         target_orientation = None
         self.agent.skills_manager.execute(
@@ -158,17 +172,22 @@ class DecisionMaker:
 
     def plan_paths(self):
         """
-        Plan any empty paths.
+        Plan all necessary paths.
         """
-        if self.ball_to_goal_path is None:
-            self.ball_to_goal_path = planner(self.grid_world, self.ball_grid_pos, 
-                                             self.goal_grid_pos, self.ball_to_goal_path)
-        if self.robot_to_ball_path is None:
-            self.robot_to_ball_path = planner(self.grid_world, self.agent_grid_pos, 
-                                              self.ball_grid_pos, self.robot_to_ball_path)
+        # t = threading.Thread(
+        #     target=planner, 
+        #     args=(self.grid_world, self.ball_grid_pos, self.goal_grid_pos, self.ball_to_goal_path)
+        # )
+        # self.planning_threads.append(t)
+        # t.start()
+        t = threading.Thread(
+            target=planner, 
+            args=(self.grid_world, self.agent_grid_pos, self.ball_grid_pos, "robot_to_ball", self.paths, self.path_ready_events)
+        )
+        self.planning_threads.append(t)
+        t.start()
 
-
-    def update_grid_world(self) -> dict:
+    def create_grid_world(self) -> dict:
         """
         Convert the simulation world to a grid world for planning purposes.
         """
@@ -180,9 +199,10 @@ class DecisionMaker:
         )
         
         # add obstacle locations
-        obstacles: list[OtherRobot] = self.agent.world.their_team_players
+        obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]
         obstacles: np.ndarray[float] = [robot.position for robot in obstacles]
         for pos in obstacles:
+            logger.debug(f"Obstacle at {pos}")
             self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]))
 
         # convert location of line in front of the goal to grid coordinates
