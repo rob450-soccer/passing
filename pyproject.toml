@@ -3,7 +3,11 @@ name = "mujococodebase"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Alan Nascimento",email = "alanvan3791@gmail.com"}
+    {name = "Alan Nascimento",email = "alanvan3791@gmail.com"},
+    {name = "Justin Boverhof", email = "boverhof@umich.edu"},
+    {name = "Anna Novak", email = "annanova@umich.edu"},
+    {name = "Felicia Sang", email = "fsang@umich.edu"},
+    {name = "Benjamin Wedin", email = "bpwedin@umich.edu"},
 ]
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -18,6 +22,7 @@ dependencies = [
     "pyinstaller (>=6.16.0,<7.0.0)",
     "onnxruntime (>=1.23.0,<2.0.0)",
     "onnx (>=1.19.0,<2.0.0)",
+    "pygame (>=2.6.1)",
 ]
 
 
