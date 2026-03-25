@@ -25,6 +25,7 @@ class State(Enum):
     GO_TO_BALL = 2
     DRIBBLE = 3
     NEUTRAL = 4
+    KICKOFF = 5
 
 
 class DecisionMaker:
@@ -37,7 +38,7 @@ class DecisionMaker:
         self.beam_pose = self._get_beam_pose(True)
         self._current_state = State.NEUTRAL
 
-        self.started = False
+        self.kicked_off = False
 
         # configuration for planning
         self.planning_threads = []
@@ -51,29 +52,12 @@ class DecisionMaker:
             "robot_to_ball": 0
         }
 
-    def start(self):
-        """Initialization tasks that require information from the server that isn't prseent when __init__() runs."""
-        self.started = True
-        self.create_grid_world()
-        self.plan_paths()
-
-    def _load_custom_beam_pose(self) -> tuple[float, float, float] | None:
-        x_str = os.getenv("PLAYER_SPAWN_X")
-        y_str = os.getenv("PLAYER_SPAWN_Y")
-        rot_str = os.getenv("PLAYER_SPAWN_ROT")
-
-        if x_str is None or y_str is None or rot_str is None:
-            return None
-
-        try:
-            x = float(x_str)
-            y = float(y_str)
-            rot = float(rot_str)
-        except ValueError:
-            logger.warning("Invalid PLAYER_SPAWN_* environment variables; ignoring custom beam pose.")
-            return None
-
-        return (x, y, rot)
+    def _kickoff(self):
+        """Initialization tasks that require information from the server that isn't present when __init__() runs."""
+        logger.debug("_kickoff()")
+        self.kicked_off = True
+        self._create_grid_world()
+        self._plan_paths()
 
     # --------------------------------------------------
     # Core Loop
@@ -96,6 +80,8 @@ class DecisionMaker:
                 self._state_dribble()
             case State.NEUTRAL:
                 self._state_neutral()
+            case State.KICKOFF:
+                self._state_kickoff()
 
         self.agent.robot.commit_motor_targets_pd()
 
@@ -123,6 +109,14 @@ class DecisionMaker:
             PlayModeEnum.OUR_GOAL,
         ):
             self._enter_state(State.NEUTRAL)
+            return
+        
+        if self.agent.world.playmode == PlayModeEnum.OUR_KICK_OFF and not self.kicked_off:
+            self._enter_state(State.KICKOFF)
+            return
+        
+        if self.agent.world.playmode == PlayModeEnum.OUR_KICK_OFF and self.kicked_off:
+            self._enter_state(State.GO_TO_BALL)
             return
 
         # All other playmodes (including PLAY_ON) → carry ball.
@@ -152,6 +146,11 @@ class DecisionMaker:
 
         self.agent.server.commit_beam(pos2d=pos2d, rotation=rotation)
 
+    def _state_kickoff(self):
+        # note: this state only runs once and immediately switches to play states
+        self._kickoff()
+        self.agent.skills_manager.execute("Neutral")
+
     def _state_getting_up(self):
         finished = self.agent.skills_manager.execute("GetUp")
         if finished:
@@ -161,23 +160,40 @@ class DecisionMaker:
         self.agent.skills_manager.execute("Neutral")
 
     def _state_go_to_ball(self):
-        # Exit: DRIBBLE if aligned and behind ball
+        # Exit: DRIBBLE
 
-        aligned, behind_ball, carry_pos, goal_pos, desired_orientation = self._compute_ball_geometry()
-
-        if carry_pos is None:  # degenerate case: ball on goal line
+        # if path planning is incomplete, wait
+        if not self.path_ready_events["robot_to_ball"].is_set():
+            self.agent.skills_manager.execute("Neutral")
+            # logger.debug("Waiting for path planning...")
             return
-
-        if aligned and behind_ball:
+        
+        # if path has been followed, wait
+        if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
+            self.agent.skills_manager.execute("Neutral")
+            logger.debug("Done following robot_to_ball path")
             self._enter_state(State.DRIBBLE)
+            # TODO: to safely dribble, we may need to plan to right before the ball, not directly to the ball
             return
-
+        
+        # follow robot-to-ball path
+        target_location = np.array(self.paths["robot_to_ball"][self.path_steps["robot_to_ball"]], dtype=float) / self.grid_scale
+        # TODO: add orientation
+        target_orientation = None
         self.agent.skills_manager.execute(
             "Walk",
-            target_2d=carry_pos,
+            target_2d=target_location,
             is_target_absolute=True,
-            orientation=None if np.linalg.norm(self.agent.world.global_position[:2] - carry_pos) > 2 else desired_orientation
+            orientation=target_orientation
         )
+        logger.debug(f"Walking to {target_location}")
+
+        # check if we've arrived and should head to the next waypoint
+        agent_location = self.agent.world.global_position[:2]
+        agent_to_target = target_location - agent_location
+        PATH_COMPLETE_THRESHOLD = 0.1
+        if np.linalg.norm(agent_to_target) <= PATH_COMPLETE_THRESHOLD:
+            self.path_steps["robot_to_ball"] += 1
 
     def _state_dribble(self):
         # Exit: GO_TO_BALL if alignment lost
@@ -217,6 +233,8 @@ class DecisionMaker:
                 pass  # no entry actions yet
             case State.NEUTRAL:
                 pass  # no entry actions yet
+            case State.KICKOFF:
+                pass
 
         self._current_state = new_state
 
@@ -224,51 +242,11 @@ class DecisionMaker:
     # Helpers
     # --------------------------------------------------
 
-    def play(self):
-        """
-        Behavior of robot during the game.
-        """
-        if not self.started:
-            self.start()
-        
-        # TODO: plan paths for robots to future locations on path to goal so they can receive passes (put in plan_paths())
-
-        # if path planning is incomplete, wait
-        if not self.path_ready_events["robot_to_ball"].is_set():
-            self.agent.skills_manager.execute("Neutral")
-            logger.debug("Waiting for path planning...")
-            return
-        
-        # if path has been followed, wait
-        if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
-            self.agent.skills_manager.execute("Neutral")
-            logger.debug("Done following robot_to_ball path")
-            return
-        
-        # follow robot-to-ball path
-        target_location = np.array(self.paths["robot_to_ball"][self.path_steps["robot_to_ball"]], dtype=float) / self.grid_scale
-        # TODO: add orientation
-        target_orientation = None
-        self.agent.skills_manager.execute(
-            "Walk",
-            target_2d=target_location,
-            is_target_absolute=True,
-            orientation=target_orientation
-        )
-        logger.debug(f"Walking to {target_location}")
-
-        # check if we've arrived and should head to the next waypoint
-        agent_location = self.agent.world.global_position[:2]
-        agent_to_target = target_location - agent_location
-        PATH_COMPLETE_THRESHOLD = 0.1
-        if np.linalg.norm(agent_to_target) <= PATH_COMPLETE_THRESHOLD:
-            self.path_steps["robot_to_ball"] += 1
-
-
-    def plan_paths(self):
+    def _plan_paths(self):
         """
         Plan all necessary paths.
         """
+        logger.debug("_plan_paths()")
         t = threading.Thread(
             target=planner, 
             args=(self.grid_world, self.agent_grid_pos, self.ball_grid_pos, "robot_to_ball", self.paths, self.path_ready_events)
@@ -276,7 +254,7 @@ class DecisionMaker:
         self.planning_threads.append(t)
         t.start()
 
-    def create_grid_world(self) -> dict:
+    def _create_grid_world(self) -> dict:
         """
         Convert the simulation world to a grid world for planning purposes.
         """
