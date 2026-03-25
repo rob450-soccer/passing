@@ -54,7 +54,6 @@ class DecisionMaker:
 
     def _kickoff(self):
         """Initialization tasks that require information from the server that isn't present when __init__() runs."""
-        logger.debug("_kickoff()")
         self.kicked_off = True
         self._create_grid_world()
         self._plan_paths()
@@ -165,13 +164,11 @@ class DecisionMaker:
         # if path planning is incomplete, wait
         if not self.path_ready_events["robot_to_ball"].is_set():
             self.agent.skills_manager.execute("Neutral")
-            # logger.debug("Waiting for path planning...")
             return
         
         # if path has been followed, wait
         if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
             self.agent.skills_manager.execute("Neutral")
-            logger.debug("Done following robot_to_ball path")
             self._enter_state(State.DRIBBLE)
             # TODO: to safely dribble, we may need to plan to right before the ball, not directly to the ball
             return
@@ -186,7 +183,7 @@ class DecisionMaker:
             is_target_absolute=True,
             orientation=target_orientation
         )
-        logger.debug(f"Walking to {target_location}")
+        # logger.debug(f"Walking to {target_location}")
 
         # check if we've arrived and should head to the next waypoint
         agent_location = self.agent.world.global_position[:2]
@@ -246,7 +243,6 @@ class DecisionMaker:
         """
         Plan all necessary paths.
         """
-        logger.debug("_plan_paths()")
         t = threading.Thread(
             target=planner, 
             args=(self.grid_world, self.agent_grid_pos, self.ball_grid_pos, "robot_to_ball", self.paths, self.path_ready_events)

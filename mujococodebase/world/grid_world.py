@@ -94,9 +94,9 @@ class GridWorld:
         y_step = 1 if y0 < y1 else -1
 
         while True:
-            if self.is_occupied(np.array([x0, y0])):
+            if self._grid[x0, y0] > 0:
                 return False
-                
+                            
             if x0 == x1 and y0 == y1:
                 # Reached the target
                 break
