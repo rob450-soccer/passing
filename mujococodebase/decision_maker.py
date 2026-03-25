@@ -1,6 +1,7 @@
 from dataclasses import Field
 import logging
 import os
+import threading
 import random
 from enum import Enum
 from typing import Mapping
@@ -9,9 +10,13 @@ import numpy as np
 from mujococodebase.utils.math_ops import MathOps
 from mujococodebase.world.field import FIFAField, HLAdultField
 from mujococodebase.world.play_mode import PlayModeEnum, PlayModeGroupEnum
+from mujococodebase.world.grid_world import GridWorld
+from mujococodebase.world.planning import ana_theta_star as planner
+from mujococodebase.world.other_robot import OtherRobot
 
 
-logger = logging.getLogger()
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__file__)
 
 
 class State(Enum):
@@ -20,6 +25,7 @@ class State(Enum):
     GO_TO_BALL = 2
     DRIBBLE = 3
     NEUTRAL = 4
+    KICKOFF = 5
 
 
 class DecisionMaker:
@@ -27,8 +33,30 @@ class DecisionMaker:
     def __init__(self, agent):
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
+        self.is_getting_up: bool = False
+
         self.beam_pose = self._get_beam_pose(True)
         self._current_state = State.NEUTRAL
+
+        self.kicked_off = False
+
+        # configuration for planning
+        self.planning_threads = []
+        self.paths = {
+            "robot_to_ball": []
+        }
+        self.path_ready_events = {
+            "robot_to_ball": threading.Event()
+        }
+        self.path_steps = {
+            "robot_to_ball": 0
+        }
+
+    def _kickoff(self):
+        """Initialization tasks that require information from the server that isn't present when __init__() runs."""
+        self.kicked_off = True
+        self._create_grid_world()
+        self._plan_paths()
 
     # --------------------------------------------------
     # Core Loop
@@ -51,6 +79,8 @@ class DecisionMaker:
                 self._state_dribble()
             case State.NEUTRAL:
                 self._state_neutral()
+            case State.KICKOFF:
+                self._state_kickoff()
 
         self.agent.robot.commit_motor_targets_pd()
 
@@ -78,6 +108,14 @@ class DecisionMaker:
             PlayModeEnum.OUR_GOAL,
         ):
             self._enter_state(State.NEUTRAL)
+            return
+        
+        if self.agent.world.playmode == PlayModeEnum.OUR_KICK_OFF and not self.kicked_off:
+            self._enter_state(State.KICKOFF)
+            return
+        
+        if self.agent.world.playmode == PlayModeEnum.OUR_KICK_OFF and self.kicked_off:
+            self._enter_state(State.GO_TO_BALL)
             return
 
         # All other playmodes (including PLAY_ON) → carry ball.
@@ -107,6 +145,11 @@ class DecisionMaker:
 
         self.agent.server.commit_beam(pos2d=pos2d, rotation=rotation)
 
+    def _state_kickoff(self):
+        # note: this state only runs once and immediately switches to play states
+        self._kickoff()
+        self.agent.skills_manager.execute("Neutral")
+
     def _state_getting_up(self):
         finished = self.agent.skills_manager.execute("GetUp")
         if finished:
@@ -116,23 +159,38 @@ class DecisionMaker:
         self.agent.skills_manager.execute("Neutral")
 
     def _state_go_to_ball(self):
-        # Exit: DRIBBLE if aligned and behind ball
+        # Exit: DRIBBLE
 
-        aligned, behind_ball, carry_pos, goal_pos, desired_orientation = self._compute_ball_geometry()
-
-        if carry_pos is None:  # degenerate case: ball on goal line
+        # if path planning is incomplete, wait
+        if not self.path_ready_events["robot_to_ball"].is_set():
+            self.agent.skills_manager.execute("Neutral")
             return
-
-        if aligned and behind_ball:
+        
+        # if path has been followed, wait
+        if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
+            self.agent.skills_manager.execute("Neutral")
             self._enter_state(State.DRIBBLE)
+            # TODO: to safely dribble, we may need to plan to right before the ball, not directly to the ball
             return
-
+        
+        # follow robot-to-ball path
+        target_location = np.array(self.paths["robot_to_ball"][self.path_steps["robot_to_ball"]], dtype=float) / self.grid_scale
+        # TODO: add orientation
+        target_orientation = None
         self.agent.skills_manager.execute(
             "Walk",
-            target_2d=carry_pos,
+            target_2d=target_location,
             is_target_absolute=True,
-            orientation=None if np.linalg.norm(self.agent.world.global_position[:2] - carry_pos) > 2 else desired_orientation
+            orientation=target_orientation
         )
+        # logger.debug(f"Walking to {target_location}")
+
+        # check if we've arrived and should head to the next waypoint
+        agent_location = self.agent.world.global_position[:2]
+        agent_to_target = target_location - agent_location
+        PATH_COMPLETE_THRESHOLD = 0.1
+        if np.linalg.norm(agent_to_target) <= PATH_COMPLETE_THRESHOLD:
+            self.path_steps["robot_to_ball"] += 1
 
     def _state_dribble(self):
         # Exit: GO_TO_BALL if alignment lost
@@ -172,12 +230,66 @@ class DecisionMaker:
                 pass  # no entry actions yet
             case State.NEUTRAL:
                 pass  # no entry actions yet
+            case State.KICKOFF:
+                pass
 
         self._current_state = new_state
 
     # --------------------------------------------------
     # Helpers
     # --------------------------------------------------
+
+    def _plan_paths(self):
+        """
+        Plan all necessary paths.
+        """
+        t = threading.Thread(
+            target=planner, 
+            args=(self.grid_world, self.agent_grid_pos, self.ball_grid_pos, "robot_to_ball", self.paths, self.path_ready_events)
+        )
+        self.planning_threads.append(t)
+        t.start()
+
+    def _create_grid_world(self) -> dict:
+        """
+        Convert the simulation world to a grid world for planning purposes.
+        """
+        # each grid cell will represent 10cm
+        self.grid_scale: int = 10
+        self.grid_world: GridWorld = GridWorld(
+            self.agent.world.field.get_length() * self.grid_scale, 
+            self.agent.world.field.get_width() * self.grid_scale
+        )
+        
+        # add obstacle locations
+        obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]
+        obstacles: np.ndarray[float] = [robot.position for robot in obstacles]
+        for pos in obstacles:
+            logger.debug(f"Obstacle at {pos}")
+            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]))
+
+        # convert location of line in front of the goal to grid coordinates
+        goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
+        goal_width = abs(self.agent.world.field.field_landmarks.landmarks["g_lup"][1] 
+                         - self.agent.world.field.field_landmarks.landmarks["g_llp"][1])
+        offsets = np.array(range(
+            round((goal_world_pos[1] - goal_width/2) * self.grid_scale), 
+            round((goal_world_pos[1] + goal_width/2) * self.grid_scale)
+        ))
+        x = round(goal_world_pos[0] * self.grid_scale)
+        y = np.round(goal_world_pos[1] * self.grid_scale + offsets)
+        self.goal_grid_pos = np.column_stack((np.full(len(offsets), x), y))
+
+        # convert location of ball to grid coordinates
+        ball_world_pos = self.agent.world.ball_pos[:2]
+        self.ball_grid_pos = np.array([round(ball_world_pos[0] * self.grid_scale), 
+                              round(ball_world_pos[1] * self.grid_scale)])
+
+        # convert location of agent to grid coordinates
+        agent_world_pos = self.agent.world.global_position[:2] # NOTE: global_position[2] is used for detecting falls and is NOT the 2D orientation
+        self.agent_grid_pos = np.array([round(agent_world_pos[0] * self.grid_scale), 
+                               round(agent_world_pos[1] * self.grid_scale)])
+        # TODO: add orientation information
 
     def _compute_ball_geometry(self):
         their_goal_pos = self.agent.world.field.get_their_goal_position()[:2]
