@@ -67,7 +67,7 @@ class Walk(Skill):
 
         self.previous_action = np.zeros(len(self.agent.robot.ROBOT_MOTORS))
 
-        self.model = load_network(model_path=os.path.join(os.path.dirname(__file__), "walk.onnx"))
+        self.model = load_network(model_path=os.path.join(os.path.dirname(__file__), "nn_walk.onnx"))
 
 
     def execute(self, reset: bool, target_2d: list, is_target_absolute: bool, orientation: float=None, is_orientation_absolute: bool=True) -> bool:
