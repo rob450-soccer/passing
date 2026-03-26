@@ -170,6 +170,7 @@ class DecisionMaker:
         if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
             self.agent.skills_manager.execute("Neutral")
             self._enter_state(State.DRIBBLE)
+            logger.debug(f"[test1] robot reached ball")
             # TODO: to safely dribble, we may need to plan to right before the ball, not directly to the ball
             return
         
@@ -260,6 +261,7 @@ class DecisionMaker:
             self.agent.world.field.get_length() * self.grid_scale, 
             self.agent.world.field.get_width() * self.grid_scale
         )
+        logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
         # add obstacle locations
         obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]

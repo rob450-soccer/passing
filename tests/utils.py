@@ -1,6 +1,7 @@
+import datetime
 import logging
 import os
-import datetime
+import random
 import sys
 
 
@@ -24,7 +25,11 @@ def color(text: str, color: str) -> str:
     return text
 
 
-def setup_test_logging(test_name: str, debug=False) -> logging.Logger:
+def generate_random_point(min_x, max_x, min_y, max_y):
+    return (random.uniform(min_x, max_x), random.uniform(min_y, max_y))
+
+
+def setup_test_logging(test_name: str, debug=True) -> logging.Logger:
     """
     Configures the logger to output to both the console and a timestamped file.
     """
