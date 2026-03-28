@@ -43,13 +43,19 @@ class DecisionMaker:
         # configuration for planning
         self.planning_threads = []
         self.paths = {
-            "robot_to_ball": []
+            "robot_to_ball": [],
+            "robot_to_goal": [], 
+            "ball_to_goal": []
         }
         self.path_ready_events = {
-            "robot_to_ball": threading.Event()
+            "robot_to_ball": threading.Event(),
+            "robot_to_goal": threading.Event(),
+            "ball_to_goal": threading.Event()
         }
         self.path_steps = {
-            "robot_to_ball": 0
+            "robot_to_ball": 0,
+            "robot_to_goal": 0,
+            "ball_to_goal": 0
         }
 
     def _kickoff(self):
@@ -170,7 +176,6 @@ class DecisionMaker:
         if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]):
             self.agent.skills_manager.execute("Neutral")
             self._enter_state(State.DRIBBLE)
-            logger.debug(f"[test1] robot reached ball")
             # TODO: to safely dribble, we may need to plan to right before the ball, not directly to the ball
             return
         
@@ -247,6 +252,20 @@ class DecisionMaker:
         t = threading.Thread(
             target=planner, 
             args=(self.grid_world, self.agent_grid_pos, self.ball_grid_pos, "robot_to_ball", self.paths, self.path_ready_events)
+        )
+        self.planning_threads.append(t)
+        t.start()
+
+        t = threading.Thread(
+            target=planner, 
+            args=(self.grid_world, self.agent_grid_pos, self.goal_grid_pos, "robot_to_goal", self.paths, self.path_ready_events)
+        )
+        self.planning_threads.append(t)
+        t.start()
+
+        t = threading.Thread(
+            target=planner, 
+            args=(self.grid_world, self.ball_grid_pos, self.goal_grid_pos, "ball_to_goal", self.paths, self.path_ready_events)
         )
         self.planning_threads.append(t)
         t.start()
