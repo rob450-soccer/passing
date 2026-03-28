@@ -1,5 +1,6 @@
 import ast
 import datetime
+import glob
 import math
 import os
 import subprocess
@@ -83,9 +84,6 @@ def run_test():
     passed_trials = 0
     trial_count = 0
 
-    player_id = 1
-    obstacle_id = 1
-
     exit_code = 0
 
     TEST_DRIVE_FOLDER = f"Test1_{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}"
@@ -105,6 +103,9 @@ def run_test():
                 server_process = None
                 player_processes = []
                 obstacle_processes = []
+
+                player_id = 1
+                obstacle_id = 1
 
                 try:
                     server_process, _server_log_thread = utils.popen_with_logged_output(
@@ -145,26 +146,25 @@ def run_test():
                     time.sleep(3)
 
                     # Spawn obstacles
-                    # for obs_x, obs_y in obs_config:
-                    obs_x, obs_y = obs_config[0]
-                    p_obs, _obs_log_thread = utils.popen_with_logged_output(
-                        [
-                            "python3",
-                            "run_obstacles.py",
-                            "--number",
-                            str(obstacle_id),
-                            "--x",
-                            str(obs_x),
-                            "--y",
-                            str(obs_y),
-                        ],
-                        cwd=OBSTACLES_DIR,
-                        logger=logger,
-                        label="obstacle",
-                        start_new_session=True,
-                    )
-                    obstacle_processes.append(p_obs)
-                    obstacle_id += 1
+                    for obs_x, obs_y in obs_config:
+                        p_obs, _obs_log_thread = utils.popen_with_logged_output(
+                            [
+                                "python3",
+                                "run_obstacles.py",
+                                "--number",
+                                str(obstacle_id),
+                                "--x",
+                                str(obs_x),
+                                "--y",
+                                str(obs_y),
+                            ],
+                            cwd=OBSTACLES_DIR,
+                            logger=logger,
+                            label="obstacle",
+                            start_new_session=True,
+                        )
+                        obstacle_processes.append(p_obs)
+                        obstacle_id += 1
                     
                     time.sleep(1) # Give robots time to spawn before kickoff
 
@@ -279,13 +279,18 @@ def run_test():
         logger.error(utils.color(f"FAILURE: {passed_trials}/{total_trials} trials passed.", "red"))
         exit_code = 1
 
-    # upload logs to Google Drive
-    if subprocess.run(f"rclone copy {TESTS_DIR}/logs/*.log google_drive:/rob450-data/Verification/{TEST_DRIVE_FOLDER} --progress", shell=True).returncode != 0:
+    # upload logs to Google Drive (use --include so rclone applies the pattern; shell * is unreliable)
+    logs_dir = os.path.join(TESTS_DIR, "logs")
+    rclone_dest = f"google_drive:/rob450-data/Verification/{TEST_DRIVE_FOLDER}"
+    if subprocess.run(
+        ["rclone", "copy", logs_dir, rclone_dest, "--include", "*.log", "--progress"],
+    ).returncode != 0:
         logger.error("Failed to upload logs to Google Drive")
     else:
         logger.info(f"Uploaded logs to Google Drive at rob450-data/Verification/{TEST_DRIVE_FOLDER}/")
-        subprocess.run(f"rm -f {TESTS_DIR}/logs/*.log", shell=True)
-        logger.info(f"Deleted local logs from {TESTS_DIR}/logs")
+        for path in glob.glob(os.path.join(logs_dir, "*.log")):
+            os.remove(path)
+        logger.info(f"Deleted local logs from {logs_dir}")
 
     sys.exit(exit_code)
 
