@@ -86,7 +86,7 @@ def run_test():
 
     exit_code = 0
 
-    TEST_DRIVE_FOLDER = f"Test1_{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}"
+    TEST_DRIVE_FOLDER = f"Test1_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     if subprocess.run(f"rclone mkdir google_drive:/rob450-data/Verification/{TEST_DRIVE_FOLDER}", shell=True).returncode != 0:
         logger.error(f"Failed to create Google Drive folder for recordings: rob450-data/Verification/{TEST_DRIVE_FOLDER}")
         sys.exit(1)
@@ -106,6 +106,9 @@ def run_test():
 
                 player_id = 1
                 obstacle_id = 1
+
+                paths_read = [False, False, False]
+                paths = []
 
                 try:
                     server_process, _server_log_thread = utils.popen_with_logged_output(
@@ -173,7 +176,7 @@ def run_test():
                         r_kick = subprocess.run(
                             ["python3", "monitor_client.py", "kickOff", "Left"],
                             cwd=RCSSSMJ_DIR,
-                            timeout=5,
+                            timeout=2,
                             capture_output=True,
                             text=True,
                         )
@@ -193,7 +196,6 @@ def run_test():
                     # watch player output
                     raw_grid_path = []
                     grid_scale = None
-                    reached_ball = False
                     start_time = time.time()
 
                     while True:
@@ -203,10 +205,15 @@ def run_test():
                             if p_player.poll() is not None:
                                 break
                             continue
+
+                        if paths_read[0]:# and paths_read[1] and paths_read[2]:
+                            read_all_paths = True
+                            break
                         
                         # Log the run_player output to both the console and the log file
                         # We strip the newline character because the logger adds its own
-                        logger.info(f"[player] {line.rstrip('\n')}")
+                        line = line.rstrip('\n')
+                        logger.info(f"[player] {line}")
                         
                         # Capture the scale (e.g., "grid world created with scale 10")
                         if "grid world created with scale" in line:
@@ -215,11 +222,20 @@ def run_test():
                             except (IndexError, ValueError):
                                 logger.error(f"Failed to parse scale from line: {line.strip()}")
 
-                        # Capture the path
+                        # Capture the paths
                         if "robot_to_ball path:" in line:
-                            raw_grid_path = parse_path_from_log(line)
-                            reached_ball = True
+                            paths.append(parse_path_from_log(line))
+                            read_all_paths = True
+                            paths_read[0] = True
                             break
+
+                        if "robot_to_goal path:" in line:
+                            paths.append(parse_path_from_log(line))
+                            paths_read[1] = True
+                        
+                        if "ball_to_goal path:" in line:
+                            paths.append(parse_path_from_log(line))
+                            paths_read[2] = True
                             
                         # Timeout guard
                         if time.time() - start_time > TIMEOUT_SECONDS:
@@ -227,20 +243,23 @@ def run_test():
                             break
 
                     # Evaluate Trial
-                    if reached_ball:
-                        if not raw_grid_path:
-                            logger.error(utils.color(f"[FAIL] Trial {trial_count}: No path was logged.", "red"))
+                    if read_all_paths:
+                        # if not any([path is None for path in paths]):
+                        if not paths[0]:
+                            logger.error(utils.color(f"[FAIL] Trial {trial_count}: Paths were not logged.", "red"))
                         elif grid_scale is None:
                             logger.error(utils.color(f"[FAIL] Trial {trial_count}: Grid scale was never logged.", "red"))
                         else:
-                            path_in_meters = [
-                                (gx / grid_scale, gy / grid_scale) 
-                                for gx, gy in raw_grid_path
-                            ]
-                            
-                            if check_intersection(path_in_meters, obs_config):
-                                logger.error(utils.color(f"[FAIL] Trial {trial_count}: Path intersected with an obstacle.", "red"))
-                            else:
+                            passed = True
+                            for path in paths:
+                                path_in_meters = [
+                                    (gx / grid_scale, gy / grid_scale) 
+                                    for gx, gy in path
+                                ]
+                                if check_intersection(path_in_meters, obs_config):
+                                    logger.error(utils.color(f"[FAIL] Trial {trial_count}: Path intersected with an obstacle.", "red"))
+                                    passed = False
+                            if passed:
                                 passed_trials += 1
                                 logger.info(utils.color(f"[PASS] Trial {trial_count}: Safe path planned.", "green"))
                     elif p_player.poll() is not None:

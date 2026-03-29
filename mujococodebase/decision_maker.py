@@ -256,19 +256,19 @@ class DecisionMaker:
         self.planning_threads.append(t)
         t.start()
 
-        t = threading.Thread(
-            target=planner, 
-            args=(self.grid_world, self.agent_grid_pos, self.goal_grid_pos, "robot_to_goal", self.paths, self.path_ready_events)
-        )
-        self.planning_threads.append(t)
-        t.start()
+        # t = threading.Thread(
+        #     target=planner, 
+        #     args=(self.grid_world, self.agent_grid_pos, self.goal_grid_pos, "robot_to_goal", self.paths, self.path_ready_events)
+        # )
+        # self.planning_threads.append(t)
+        # t.start()
 
-        t = threading.Thread(
-            target=planner, 
-            args=(self.grid_world, self.ball_grid_pos, self.goal_grid_pos, "ball_to_goal", self.paths, self.path_ready_events)
-        )
-        self.planning_threads.append(t)
-        t.start()
+        # t = threading.Thread(
+        #     target=planner, 
+        #     args=(self.grid_world, self.ball_grid_pos, self.goal_grid_pos, "ball_to_goal", self.paths, self.path_ready_events)
+        # )
+        # self.planning_threads.append(t)
+        # t.start()
 
     def _create_grid_world(self) -> dict:
         """
