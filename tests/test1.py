@@ -79,6 +79,10 @@ def run_test():
         utils.generate_random_point(FIELD_MIN_X, FIELD_MAX_X, FIELD_MIN_Y, FIELD_MAX_Y) 
         for _ in range(10)
     ]
+    ball_positions = [
+        utils.generate_random_point(FIELD_MIN_X, FIELD_MAX_X, FIELD_MIN_Y, FIELD_MAX_Y) 
+        for _ in range(10)
+    ]
 
     total_trials = 100
     passed_trials = 0
@@ -94,11 +98,14 @@ def run_test():
 
     try:
         for obs_config in obstacle_configs:
-            for start_x, start_y in start_positions:
+            for i in range(len(start_positions)):
                 trial_count += 1
+                start_x, start_y = start_positions[i]
+                ball_x, ball_y = ball_positions[i]
                 logger.info(f"{'-'*50} Running trial {trial_count}/{total_trials} {'-'*50}")
                 logger.info(f"Obstacle configuration: {obs_config}")
                 logger.info(f"Start position: ({start_x}, {start_y})")
+                logger.info(f"Ball position: ({ball_x}, {ball_y})")
                 
                 server_process = None
                 player_processes = []
@@ -173,19 +180,27 @@ def run_test():
 
                     # kickoff (with timeout in case it doesn't exit automatically)
                     try:
-                        r_kick = subprocess.run(
+                        place_ball = subprocess.run(
+                            ["python3", "monitor_client.py", "ball", f'"(pos {ball_x} {ball_y} 0)"'],
+                            cwd=RCSSSMJ_DIR,
+                            timeout=2,
+                            capture_output=True,
+                            text=True,
+                        )
+                        time.sleep(1)
+                        kickoff = subprocess.run(
                             ["python3", "monitor_client.py", "kickOff", "Left"],
                             cwd=RCSSSMJ_DIR,
                             timeout=2,
                             capture_output=True,
                             text=True,
                         )
-                        for line in (r_kick.stdout or "").splitlines():
+                        for line in (kickoff.stdout or "").splitlines():
                             logger.info(f"[monitor] {line}")
-                        for line in (r_kick.stderr or "").splitlines():
+                        for line in (kickoff.stderr or "").splitlines():
                             logger.info(f"[monitor] {line}")
                     except subprocess.TimeoutExpired as e:
-                        logger.debug("monitor_client.py timed out, assuming kickoff signal was sent.")
+                        logger.debug("monitor_client.py timed out.")
                         if e.stdout:
                             for line in e.stdout.splitlines():
                                 logger.info(f"[monitor] {line}")
@@ -194,7 +209,6 @@ def run_test():
                                 logger.info(f"[monitor] {line}")
 
                     # watch player output
-                    raw_grid_path = []
                     grid_scale = None
                     start_time = time.time()
 
@@ -245,7 +259,7 @@ def run_test():
                     # Evaluate Trial
                     if read_all_paths:
                         # if not any([path is None for path in paths]):
-                        if not paths[0]:
+                        if len(paths) < 1:
                             logger.error(utils.color(f"[FAIL] Trial {trial_count}: Paths were not logged.", "red"))
                         elif grid_scale is None:
                             logger.error(utils.color(f"[FAIL] Trial {trial_count}: Grid scale was never logged.", "red"))
