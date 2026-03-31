@@ -22,6 +22,7 @@ class State(Enum):
     GO_TO_BALL = 2
     DRIBBLE = 3
     NEUTRAL = 4
+    GO_TO_RECEIVE_POSITION = 5
 
 
 class DecisionMaker:
@@ -32,7 +33,6 @@ class DecisionMaker:
         Starts in NEUTRAL; the first call to update_current_behavior will
         immediately overwrite this via _check_global_interrupts.
         """
-
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
 
@@ -47,20 +47,24 @@ class DecisionMaker:
         self.replan_pos_threshold: float = 0.1 # Minimum distance in meters for replan to occur
         self.time_at_last_plan: float = 0.0
         self.replan_cooldown: float = 3.0  # seconds
+        self.is_passer: bool = True
 
         # Pathfinding
         self.planning_threads = []
         self.paths = {
             "robot_to_ball": [],
             "dribble": [],
+            "robot_to_receive": [],
         }
         self.path_ready_events = {
             "robot_to_ball": threading.Event(),
             "dribble": threading.Event(),
+            "robot_to_receive": threading.Event(),
         }
         self.path_steps = {
             "robot_to_ball": 0,
             "dribble": 0,
+            "robot_to_receive": 0,
         }
 
     # --------------------------------------------------
@@ -71,6 +75,7 @@ class DecisionMaker:
         if self.agent.world.playmode is PlayModeEnum.GAME_OVER:
             return
 
+        self.is_passer = self._is_closest_to_ball()
         self._check_global_interrupts()
         self._check_for_replan()
 
@@ -85,6 +90,8 @@ class DecisionMaker:
                 self._state_dribble()
             case State.NEUTRAL:
                 self._state_neutral()
+            case State.GO_TO_RECEIVE_POSITION:
+                self._state_go_to_receive_position()
         
         if (self.agent.world.playmode_group not in (PlayModeGroupEnum.ACTIVE_BEAM, PlayModeGroupEnum.PASSIVE_BEAM) and 
             not self.has_initialized):
@@ -98,7 +105,6 @@ class DecisionMaker:
 
     def _check_global_interrupts(self):
         """Global transitions (higher priority overrides)"""
-
         # 1. Beaming — always highest priority.
         #    Missing a beam window causes the agent to spawn in the wrong place.
         if self.agent.world.playmode_group in (
@@ -124,7 +130,8 @@ class DecisionMaker:
 
         # 4. Default: enter GO_TO_BALL if not already in an active play state.
         #    GO_TO_BALL and DRIBBLE transition between each other internally.
-        if self._current_state not in (State.GO_TO_BALL, State.DRIBBLE) and self.has_initialized:
+        #    GO_TO_BALL will transition to GO_TO_RECEIVE_POSITION immedietely, if needed.
+        if self._current_state not in (State.GO_TO_BALL, State.DRIBBLE, State.GO_TO_RECEIVE_POSITION) and self.has_initialized:
             self._enter_state(State.GO_TO_BALL)
     
     def _enter_state(self, new_state: State) -> None:
@@ -143,6 +150,8 @@ class DecisionMaker:
                 self._replan()
             case State.NEUTRAL:
                 pass  # No entry actions yet.
+            case State.GO_TO_RECEIVE_POSITION:
+                pass
 
         self._current_state = new_state
 
@@ -180,9 +189,14 @@ class DecisionMaker:
 
     def _state_go_to_ball(self):
         """
-        Follow the planned path to the carry position behind the ball,
-        facing the ball-to-goal direction when close. Hands off to DRIBBLE.
+        Follow the planned path to the position behind the ball, facing the ball-to-goal direction when close.
+        Transitions to DRIBBLE if path is completed.
+        Transitions to GO_TO_RECEIVE_POSITION if not self.is_passer.
         """
+        if not self.is_passer:
+            self._enter_state(State.GO_TO_RECEIVE_POSITION)
+            return
+        
         ball_pos = self.agent.world.ball_pos[:2]
         goal_pos = self.agent.world.field.get_their_goal_position()[:2]
         ball_to_goal = goal_pos - ball_pos
@@ -210,6 +224,24 @@ class DecisionMaker:
 
         self._follow_path("dribble", next_state=State.GO_TO_BALL, target_orientation=desired_orientation)
 
+    def _state_go_to_receive_position(self):
+        """
+        Follow the planned path to the receive position.
+        Transitions to NEUTRAL if path is completed.
+        Transitions to GO_TO_BALL if is_passer.
+        """
+        if self.is_passer:
+            self._enter_state(State.GO_TO_BALL)
+            return
+        
+        ball_pos = self.agent.world.ball_pos[:2]
+        goal_pos = self.agent.world.field.get_their_goal_position()[:2]
+        ball_to_goal = goal_pos - ball_pos
+        ball_to_goal_norm = np.linalg.norm(ball_to_goal)
+        desired_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else None
+
+        self._follow_path("robot_to_receive", next_state=State.NEUTRAL, target_orientation=desired_orientation)
+
     # --------------------------------------------------
     # Per-Frame Helpers
     # --------------------------------------------------
@@ -236,7 +268,6 @@ class DecisionMaker:
 
     def _initialize(self) -> None:
         logger.debug("agent initialization")
-
         self._create_grid_world()
         self._plan_paths()
         self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
@@ -256,7 +287,6 @@ class DecisionMaker:
             target_orientation: Desired heading (radians) passed to the Walk skill.
                          None lets the Walk skill choose its own heading.
         """
-
         # if path planning is incomplete, wait
         if not self.path_ready_events[path_key].is_set():
             last = getattr(self, "_last_waypoints", {}).get(path_key)
@@ -317,6 +347,7 @@ class DecisionMaker:
         for path_key, target in (
             ("robot_to_ball", self.carry_grid_pos),
             ("dribble", self.dribble_grid_pos),
+            ("robot_to_receive", self.receive_grid_pos),
         ):
             t = threading.Thread(
                 target=planner,
@@ -390,6 +421,41 @@ class DecisionMaker:
             round(dribble_world_pos[1] * self.grid_scale),
         ])
 
+        # Receive position: min of 4 meters from ball to goal along ball-to-goal line,
+        # or half way from ball to goal along ball-to-goal line.
+        receive_distance = min(4.0, 0.5 * ball_to_goal_norm)
+        receive_world_pos = ball_world_pos + ball_to_goal_dir * receive_distance
+        self.receive_grid_pos = np.array([
+            round(receive_world_pos[0] * self.grid_scale),
+            round(receive_world_pos[1] * self.grid_scale),
+        ])
+    
+    def _is_closest_to_ball(self) -> bool:
+        """
+        Returns True if this agent is closer to the ball than all teammates.
+
+        Visibility is determined by last_seen_time being set on the OtherRobot object.
+        If no teammates are visible, returns True, since it is assumed it is the only player.
+
+        Returns:
+            bool: True if this agent is the closest to the ball, False otherwise.
+        """
+        ball_pos = self.agent.world.ball_pos[:2]
+        my_pos = self.agent.world.global_position[:2]
+        my_dist = np.linalg.norm(my_pos - ball_pos)
+
+        visible_teammates = [
+            player for player in self.agent.world.our_team_players
+            if player.last_seen_time is not None          # only consider teammates with a known position
+            and np.linalg.norm(player.position[:2] - my_pos) > 0.1    # exclude self
+        ]
+
+        if not visible_teammates:
+            return True
+
+        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in visible_teammates)
+        return my_dist <= closest_teammate_dist
+
     def _get_beam_pose(self, random_poses: bool):
         """
         Returns the beam pose (x, y, rotation_deg) for this agent.
@@ -408,7 +474,6 @@ class DecisionMaker:
         Returns:
             A (x, y, rotation_deg) tuple representing the beam pose.
         """
-
         # 1. Custom pose takes priority over everything else.
         x = os.getenv("PLAYER_SPAWN_X")
         y = os.getenv("PLAYER_SPAWN_Y")
