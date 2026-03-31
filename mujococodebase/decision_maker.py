@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import random
+import time
 from enum import Enum
 
 import numpy as np
@@ -21,23 +22,33 @@ class State(Enum):
     GO_TO_BALL = 2
     DRIBBLE = 3
     NEUTRAL = 4
-    CREATE_PATHS = 5
 
 
 class DecisionMaker:
 
     def __init__(self, agent):
+        """
+        Initialise the DecisionMaker and all FSM state variables.
+        Starts in NEUTRAL; the first call to update_current_behavior will
+        immediately overwrite this via _check_global_interrupts.
+        """
+
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
 
+        # Beaming and initialization
         self.beam_pose = self._get_beam_pose(random_poses=True)
-        self._current_state = State.NEUTRAL
-
-        self.paths_created = False
-        self.ball_pos_at_last_plan: np.ndarray | None = None
-        self.replan_threshold: float = 0.5  # meters
+        self._current_state = State.NEUTRAL # This will be immedietely overwritten
+        self.has_initialized = False
         self.grid_scale: int = 10  # each grid cell = 10 cm in world space
 
+        # Pathfinding re-plan characteristics
+        self.replan_pos_threshold: float = 0.1 # Minimum distance in meters for replan to occur
+        self.ball_pos_at_last_plan: np.ndarray | None = None # Ball pos during last pathfinding planning
+        self.last_replan_time: float = 0.0
+        self.replan_cooldown: float = 3.0  # seconds
+
+        # Pathfinding
         self.planning_threads = []
         self.paths = {
             "robot_to_ball": [],
@@ -74,8 +85,10 @@ class DecisionMaker:
                 self._state_dribble()
             case State.NEUTRAL:
                 self._state_neutral()
-            case State.CREATE_PATHS:
-                self._state_create_paths()
+        
+        if (self.agent.world.playmode_group not in (PlayModeGroupEnum.ACTIVE_BEAM, PlayModeGroupEnum.PASSIVE_BEAM) and 
+            not self.has_initialized):
+            self._initialize()
 
         self.agent.robot.commit_motor_targets_pd()
 
@@ -86,7 +99,7 @@ class DecisionMaker:
     def _check_global_interrupts(self):
         """Global transitions (higher priority overrides)"""
 
-        # 1. Beaming — always highest priority, even during initialisation.
+        # 1. Beaming — always highest priority.
         #    Missing a beam window causes the agent to spawn in the wrong place.
         if self.agent.world.playmode_group in (
             PlayModeGroupEnum.ACTIVE_BEAM,
@@ -95,17 +108,12 @@ class DecisionMaker:
             self._enter_state(State.BEAMING)
             return
 
-        # 2. Path creation — must complete before any play states are entered.
-        if not self.paths_created:
-            self._enter_state(State.CREATE_PATHS)
-            return
-
-        # 3. GetUp — robot has fallen and must recover before anything else.
+        # 2. GetUp — robot has fallen and must recover before anything else.
         if self.agent.skills_manager.is_ready("GetUp"):
             self._enter_state(State.GETTING_UP)
             return
 
-        # 4. Neutral playmodes — game is paused, no active play behaviour needed.
+        # 3. Neutral playmodes — game is paused, no active play behaviour needed.
         if self.agent.world.playmode in (
             PlayModeEnum.BEFORE_KICK_OFF,
             PlayModeEnum.THEIR_GOAL,
@@ -114,10 +122,29 @@ class DecisionMaker:
             self._enter_state(State.NEUTRAL)
             return
 
-        # 5. Default: enter GO_TO_BALL if not already in an active play state.
+        # 4. Default: enter GO_TO_BALL if not already in an active play state.
         #    GO_TO_BALL and DRIBBLE transition between each other internally.
-        if self._current_state not in (State.GO_TO_BALL, State.DRIBBLE):
+        if self._current_state not in (State.GO_TO_BALL, State.DRIBBLE) and self.has_initialized:
             self._enter_state(State.GO_TO_BALL)
+    
+    def _enter_state(self, new_state: State) -> None:
+        """Transition to new_state, running any entry actions. Nothing if already in that state."""
+        if self._current_state == new_state:
+            return
+
+        match new_state:
+            case State.BEAMING:
+                pass  # No entry actions yet.
+            case State.GETTING_UP:
+                pass  # No entry actions yet.
+            case State.GO_TO_BALL:
+                pass  # No entry actions yet.
+            case State.DRIBBLE:
+                self._replan()
+            case State.NEUTRAL:
+                pass  # No entry actions yet.
+
+        self._current_state = new_state
 
     # --------------------------------------------------
     # State Functions
@@ -137,16 +164,9 @@ class DecisionMaker:
             rotation = self.beam_pose[2]
         else:
             logger.warning("No valid beam pose generated before beam state reached.")
+            return
 
         self.agent.server.commit_beam(pos2d=pos2d, rotation=rotation)
-
-    def _state_create_paths(self):
-        """Build the grid world and launch path planning threads. Runs exactly once, then transitions to NEUTRAL."""
-        self._create_grid_world()
-        self._plan_paths()
-        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
-        self.paths_created = True
-        self._enter_state(State.NEUTRAL)
 
     def _state_getting_up(self):
         """Execute the GetUp skill. Transition to GO_TO_BALL when finished."""
@@ -191,33 +211,36 @@ class DecisionMaker:
         self._follow_path("dribble", next_state=State.GO_TO_BALL, target_orientation=desired_orientation)
 
     # --------------------------------------------------
-    # State Entry
+    # Per-Frame Helpers
     # --------------------------------------------------
-
-    def _enter_state(self, new_state: State) -> None:
-        """Transition to a new state. Nothing if already in that state."""
-        if self._current_state == new_state:
+    
+    def _check_for_replan(self):
+        """
+        Trigger a full replan if the ball has moved beyond replan_pos_threshold
+        since the last plan and the cooldown has elapsed. Skipped until initialized.
+        """
+        if not self.has_initialized:
+            return
+        if self.ball_pos_at_last_plan is None:
+            return
+        if time.time() - self.last_replan_time < self.replan_cooldown:
             return
 
-        match new_state:
-            case State.BEAMING:
-                pass  # No entry actions yet.
-            case State.GETTING_UP:
-                pass  # No entry actions yet.
-            case State.GO_TO_BALL:
-                pass  # No entry actions yet.
-            case State.DRIBBLE:
-                self._replan()
-            case State.NEUTRAL:
-                pass  # No entry actions yet.
-            case State.CREATE_PATHS:
-                pass  # No entry actions yet.
-
-        self._current_state = new_state
+        current_ball_pos = self.agent.world.ball_pos[:2]
+        if np.linalg.norm(current_ball_pos - self.ball_pos_at_last_plan) > self.replan_pos_threshold:
+            self._replan()
 
     # --------------------------------------------------
-    # Helpers
+    # Standard Helpers
     # --------------------------------------------------
+
+    def _initialize(self) -> None:
+        logger.debug("agent initialization")
+
+        self._create_grid_world()
+        self._plan_paths()
+        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
+        self.has_initialized = True
 
     def _follow_path(self, path_key: str, next_state: State, target_orientation: float | None = None) -> None:
         """
@@ -233,14 +256,24 @@ class DecisionMaker:
             target_orientation: Desired heading (radians) passed to the Walk skill.
                          None lets the Walk skill choose its own heading.
         """
+
         # if path planning is incomplete, wait
         if not self.path_ready_events[path_key].is_set():
-            self.agent.skills_manager.execute("Neutral")
+            last = getattr(self, "_last_waypoints", {}).get(path_key)
+            if last is not None:
+                target_location = np.array(last, dtype=float) / self.grid_scale
+                self.agent.skills_manager.execute(
+                    "Walk",
+                    target_2d=target_location,
+                    is_target_absolute=True,
+                    orientation=target_orientation,
+                )
+            else:
+                self.agent.skills_manager.execute("Neutral")
             return
 
         # if path has been followed, wait
         if self.path_steps[path_key] >= len(self.paths[path_key]):
-            self.agent.skills_manager.execute("Neutral")
             self._enter_state(next_state)
             return
 
@@ -260,23 +293,13 @@ class DecisionMaker:
         if np.linalg.norm(target_location - agent_location) <= PATH_COMPLETE_THRESHOLD:
             self.path_steps[path_key] += 1
 
-    def _check_for_replan(self):
-        """
-        If the ball has moved beyond the replan threshold.
-        Skipped during CREATE_PATHS to avoid launching duplicate threads.
-        """
-        if not self.paths_created:
-            return
-        if self.ball_pos_at_last_plan is None:
-            return
-        current_ball_pos = self.agent.world.ball_pos[:2]
-        if np.linalg.norm(current_ball_pos - self.ball_pos_at_last_plan) > self.replan_threshold:
-            self._replan()
-
     def _replan(self):
-        """
-        discard all current paths and replan.
-        """
+        """Discard all current paths and replan."""
+        self._last_waypoints = {
+            key: self.paths[key][self.path_steps[key]] if self.paths[key] and self.path_steps[key] < len(self.paths[key]) else None
+            for key in self.paths
+        }
+
         for key in list(self.paths.keys()):
             self.paths[key] = []
             self.path_ready_events[key].clear()
@@ -285,6 +308,7 @@ class DecisionMaker:
         self._create_grid_world()
         self._plan_paths()
         self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
+        self.last_replan_time = time.time()
 
     def _plan_paths(self):
         """
