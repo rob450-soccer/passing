@@ -43,13 +43,19 @@ class DecisionMaker:
         # configuration for planning
         self.planning_threads = []
         self.paths = {
-            "robot_to_ball": []
+            "robot_to_ball": [],
+            "robot_to_goal": [], 
+            "ball_to_goal": []
         }
         self.path_ready_events = {
-            "robot_to_ball": threading.Event()
+            "robot_to_ball": threading.Event(),
+            "robot_to_goal": threading.Event(),
+            "ball_to_goal": threading.Event()
         }
         self.path_steps = {
-            "robot_to_ball": 0
+            "robot_to_ball": 0,
+            "robot_to_goal": 0,
+            "ball_to_goal": 0
         }
 
     def _kickoff(self):
@@ -250,6 +256,20 @@ class DecisionMaker:
         self.planning_threads.append(t)
         t.start()
 
+        # t = threading.Thread(
+        #     target=planner, 
+        #     args=(self.grid_world, self.agent_grid_pos, self.goal_grid_pos, "robot_to_goal", self.paths, self.path_ready_events)
+        # )
+        # self.planning_threads.append(t)
+        # t.start()
+
+        # t = threading.Thread(
+        #     target=planner, 
+        #     args=(self.grid_world, self.ball_grid_pos, self.goal_grid_pos, "ball_to_goal", self.paths, self.path_ready_events)
+        # )
+        # self.planning_threads.append(t)
+        # t.start()
+
     def _create_grid_world(self) -> dict:
         """
         Convert the simulation world to a grid world for planning purposes.
@@ -260,6 +280,7 @@ class DecisionMaker:
             self.agent.world.field.get_length() * self.grid_scale, 
             self.agent.world.field.get_width() * self.grid_scale
         )
+        logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
         # add obstacle locations
         obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]
