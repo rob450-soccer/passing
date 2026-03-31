@@ -23,6 +23,7 @@ class State(Enum):
     DRIBBLE = 3
     NEUTRAL = 4
     GO_TO_RECEIVE_POSITION = 5
+    WAIT_FOR_PASS = 6
 
 
 class DecisionMaker:
@@ -78,6 +79,7 @@ class DecisionMaker:
         self.is_passer = self._is_closest_to_ball()
         self._check_global_interrupts()
         self._check_for_replan()
+        print(self._current_state)
 
         match self._current_state:
             case State.BEAMING:
@@ -92,6 +94,8 @@ class DecisionMaker:
                 self._state_neutral()
             case State.GO_TO_RECEIVE_POSITION:
                 self._state_go_to_receive_position()
+            case State.WAIT_FOR_PASS:
+                self._state_wait_for_pass()
         
         if (self.agent.world.playmode_group not in (PlayModeGroupEnum.ACTIVE_BEAM, PlayModeGroupEnum.PASSIVE_BEAM) and 
             not self.has_initialized):
@@ -129,9 +133,13 @@ class DecisionMaker:
             return
 
         # 4. Default: enter GO_TO_BALL if not already in an active play state.
-        #    GO_TO_BALL and DRIBBLE transition between each other internally.
-        #    GO_TO_BALL will transition to GO_TO_RECEIVE_POSITION immedietely, if needed.
-        if self._current_state not in (State.GO_TO_BALL, State.DRIBBLE, State.GO_TO_RECEIVE_POSITION) and self.has_initialized:
+        #    GO_TO_BALL will transition to any appropriate active play state automatically.
+        if self._current_state not in (
+            State.GO_TO_BALL, 
+            State.DRIBBLE, 
+            State.GO_TO_RECEIVE_POSITION,
+            State.WAIT_FOR_PASS,
+        ) and self.has_initialized:
             self._enter_state(State.GO_TO_BALL)
     
     def _enter_state(self, new_state: State) -> None:
@@ -151,7 +159,9 @@ class DecisionMaker:
             case State.NEUTRAL:
                 pass  # No entry actions yet.
             case State.GO_TO_RECEIVE_POSITION:
-                pass
+                self._replan()
+            case State.WAIT_FOR_PASS:
+                pass  # No entry actions yet.
 
         self._current_state = new_state
 
@@ -214,8 +224,18 @@ class DecisionMaker:
         """
         Follow the planned dribble path through the ball toward the goal.
         Falls back to GO_TO_BALL when the path is exhausted.
-        The dribble path points ahead of the ball so the agent pushes it toward the goal.
+        Transitions to GO_TO_BALL when the path is complete.
+        Transitions to GO_TO_BALL when the robot is out of range of the ball.
+        
         """
+        my_pos = self.agent.world.global_position[:2]
+        ball_pos = self.agent.world.ball_pos[:2]
+
+        DRIBBLE_ABANDON_THRESHOLD = 1.0  # meters
+        if np.linalg.norm(my_pos - ball_pos) > DRIBBLE_ABANDON_THRESHOLD:
+            self._enter_state(State.GO_TO_BALL)
+            return
+
         ball_pos = self.agent.world.ball_pos[:2]
         goal_pos = self.agent.world.field.get_their_goal_position()[:2]
         ball_to_goal = goal_pos - ball_pos
@@ -240,7 +260,43 @@ class DecisionMaker:
         ball_to_goal_norm = np.linalg.norm(ball_to_goal)
         desired_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else None
 
-        self._follow_path("robot_to_receive", next_state=State.NEUTRAL, target_orientation=desired_orientation)
+        self._follow_path("robot_to_receive", next_state=State.WAIT_FOR_PASS, target_orientation=desired_orientation)
+    
+    def _state_wait_for_pass(self):
+        """
+        Hold position at the receive point, turning to face ball
+        Transitions to GO_TO_BALL if is_passer.
+        Transitions to GO_TO_RECEIVE_POSITION if greater than threshold away from receive position.
+        """
+
+        if self.is_passer:
+            self._enter_state(State.GO_TO_BALL)
+            return
+
+        my_pos = self.agent.world.global_position[:2]
+        ball_pos = self.agent.world.ball_pos[:2]
+        goal_pos = self.agent.world.field.get_their_goal_position()[:2]
+
+        ball_to_goal = goal_pos - ball_pos
+        ball_to_goal_norm = np.linalg.norm(ball_to_goal)
+        ball_to_goal_dir = ball_to_goal / ball_to_goal_norm if ball_to_goal_norm > 0 else np.zeros(2)
+        receive_distance = min(4.0, 0.5 * ball_to_goal_norm)
+        current_receive_pos = ball_pos + ball_to_goal_dir * receive_distance
+
+        RECEIVE_DRIFT_THRESHOLD = 0.5  # meters
+        if np.linalg.norm(my_pos - current_receive_pos) > RECEIVE_DRIFT_THRESHOLD:
+            self._enter_state(State.GO_TO_RECEIVE_POSITION)
+            return
+
+        ball_dir = ball_pos - my_pos
+        orientation = MathOps.vector_angle(ball_dir) if np.linalg.norm(ball_dir) > 0 else None
+
+        self.agent.skills_manager.execute(
+            "Walk",
+            target_2d=my_pos,
+            is_target_absolute=True,
+            orientation=orientation,
+        )
 
     # --------------------------------------------------
     # Per-Frame Helpers
@@ -440,14 +496,15 @@ class DecisionMaker:
         Returns:
             bool: True if this agent is the closest to the ball, False otherwise.
         """
+        return self.agent.world.number == 1 #temporary fix until teammate visibility is fixed
         ball_pos = self.agent.world.ball_pos[:2]
         my_pos = self.agent.world.global_position[:2]
         my_dist = np.linalg.norm(my_pos - ball_pos)
 
         visible_teammates = [
             player for player in self.agent.world.our_team_players
-            if player.last_seen_time is not None          # only consider teammates with a known position
-            and np.linalg.norm(player.position[:2] - my_pos) > 0.1    # exclude self
+            if player.last_seen_time is not None # only consider teammates with a known position
+            and np.linalg.norm(player.position[:2] - my_pos) > 0.1 # exclude self
         ]
 
         if not visible_teammates:
@@ -488,9 +545,9 @@ class DecisionMaker:
         # 2. Random pose within each agent's designated spawn zone.
         if random_poses:
             if self.agent.world.number == 1:
-                return (random.uniform(1, 4), random.uniform(0.5, 4), 0)
+                return (random.uniform(1, 4), random.uniform(0.7, 4), 0)
             elif self.agent.world.number == 2:
-                return (random.uniform(1, 4), random.uniform(-0.5, -4), 0)
+                return (random.uniform(1, 4), random.uniform(-0.7, -4), 0)
             else:
                 logger.warning("Agent has no random spawn zone defined; falling back to origin.")
                 return (0.0, 0.0, 0.0)
