@@ -43,9 +43,9 @@ class DecisionMaker:
         self.grid_scale: int = 10  # each grid cell = 10 cm in world space
 
         # Pathfinding re-plan characteristics
-        self.replan_pos_threshold: float = 0.1 # Minimum distance in meters for replan to occur
         self.ball_pos_at_last_plan: np.ndarray | None = None # Ball pos during last pathfinding planning
-        self.last_replan_time: float = 0.0
+        self.replan_pos_threshold: float = 0.1 # Minimum distance in meters for replan to occur
+        self.time_at_last_plan: float = 0.0
         self.replan_cooldown: float = 3.0  # seconds
 
         # Pathfinding
@@ -223,7 +223,7 @@ class DecisionMaker:
             return
         if self.ball_pos_at_last_plan is None:
             return
-        if time.time() - self.last_replan_time < self.replan_cooldown:
+        if time.time() - self.time_at_last_plan < self.replan_cooldown:
             return
 
         current_ball_pos = self.agent.world.ball_pos[:2]
@@ -307,8 +307,8 @@ class DecisionMaker:
         self.planning_threads = [t for t in self.planning_threads if t.is_alive()]
         self._create_grid_world()
         self._plan_paths()
-        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
-        self.last_replan_time = time.time()
+        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2]
+        self.time_at_last_plan = time.time()
 
     def _plan_paths(self):
         """
@@ -423,9 +423,9 @@ class DecisionMaker:
         # 2. Random pose within each agent's designated spawn zone.
         if random_poses:
             if self.agent.world.number == 1:
-                return (random.uniform(0, 6), random.uniform(0.5, 4), 0)
+                return (random.uniform(1, 4), random.uniform(0.5, 4), 0)
             elif self.agent.world.number == 2:
-                return (random.uniform(0, 6), random.uniform(-0.5, -4), 0)
+                return (random.uniform(1, 4), random.uniform(-0.5, -4), 0)
             else:
                 logger.warning("Agent has no random spawn zone defined; falling back to origin.")
                 return (0.0, 0.0, 0.0)
