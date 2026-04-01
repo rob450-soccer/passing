@@ -1,5 +1,19 @@
 #!/bin/bash
 
+# Usage:
+#   ./start_custom_players.sh <positions_file> [host] [port] [field]
+#
+# positions_file format:
+#   - Lines starting with '#' or empty lines are ignored.
+#   - The first non-empty, non-comment line is the TEAM NAME.
+#   - Each subsequent non-empty, non-comment line should be:
+#         x y
+#     or  x y rot
+#     where x, y, rot are floats (field coordinates, rot in degrees).
+#
+# Field can also be specified here or overridden via CLI:
+#   - Field: 4th argument (default: hl_adult)
+
 set -e
 
 positions_file="$1"
