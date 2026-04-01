@@ -13,6 +13,7 @@ from mujococodebase.world.play_mode import PlayModeEnum, PlayModeGroupEnum
 from mujococodebase.world.grid_world import GridWorld
 from mujococodebase.world.planning import ana_theta_star as planner
 from mujococodebase.world.other_robot import OtherRobot
+from mujococodebase.path_viz_emitter import emit as _viz_emit
 
 
 logging.basicConfig(level=logging.DEBUG)
@@ -183,6 +184,20 @@ class DecisionMaker:
         target_location = np.array(self.paths["robot_to_ball"][self.path_steps["robot_to_ball"]], dtype=float) / self.grid_scale
         # TODO: add orientation
         target_orientation = None
+
+         # ── PATH VIZ ──────────────────────────────────────────────────────────
+        agent_world_pos = self.agent.world.global_position[:2].tolist()
+        _viz_emit(
+            player_num=self.agent.world.number,
+            team=self.agent.world.team_name,
+            planned_path=self.paths["robot_to_ball"],
+            grid_scale=self.grid_scale,
+            current_step=self.path_steps["robot_to_ball"],
+            current_pos=agent_world_pos,
+            target_pos=getattr(self, "_viz_goal_world", None),
+        )
+        # ── END VIZ ───────────────────────────────────────────────────────────
+
         self.agent.skills_manager.execute(
             "Walk",
             target_2d=target_location,
@@ -282,12 +297,13 @@ class DecisionMaker:
         )
         logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
-        # add obstacle locations
+        # add obstacle locations (enemies and teammates, excluding self)
         obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]
-        obstacles: np.ndarray[float] = [robot.position for robot in obstacles]
-        for pos in obstacles:
+        obstacles += [player for player in self.agent.world.our_team_players if player.last_seen_time is not None and player is not self.agent]
+        for robot in obstacles:
+            pos = robot.position
             logger.debug(f"Obstacle at {pos}")
-            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]))
+            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), inflation_amount=6)
 
         # convert location of line in front of the goal to grid coordinates
         goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
@@ -307,10 +323,13 @@ class DecisionMaker:
                               round(ball_world_pos[1] * self.grid_scale)])
 
         # convert location of agent to grid coordinates
-        agent_world_pos = self.agent.world.global_position[:2] # NOTE: global_position[2] is used for detecting falls and is NOT the 2D orientation
+        agent_world_pos = self.agent.world.global_position[:2]
         self.agent_grid_pos = np.array([round(agent_world_pos[0] * self.grid_scale), 
                                round(agent_world_pos[1] * self.grid_scale)])
         # TODO: add orientation information
+
+        # cache the goal world pos for the viz target marker
+        self._viz_goal_world = list(goal_world_pos)
 
     def _compute_ball_geometry(self):
         their_goal_pos = self.agent.world.field.get_their_goal_position()[:2]
