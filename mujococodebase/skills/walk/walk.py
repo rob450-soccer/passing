@@ -1,5 +1,6 @@
 import math
 import os
+import json
 import numpy as np
 from mujococodebase.skills.skill import Skill
 from mujococodebase.utils.math_ops import MathOps
@@ -10,65 +11,34 @@ class Walk(Skill):
     def __init__(self, agent):
         super().__init__(agent)
         self.joint_nominal_position = np.array(
-            [
-                0.0,
-                0.0,
-                0.0,
-                1.4,
-                0.0,
-                -0.4,
-                0.0,
-                -1.4,
-                0.0,
-                0.4,
-                0.0,
-                -0.4,
-                0.0,
-                0.0,
-                0.8,
-                -0.4,
-                0.0,
-                0.4,
-                0.0,
-                0.0,
-                -0.8,
-                0.4,
-                0.0,
-            ]
-        )
-        self.train_sim_flip = np.array(
-            [
-                1.0,
-                -1.0,
-                1.0,
-                -1.0,
-                -1.0,
-                1.0,
-                -1.0,
-                -1.0,
-                1.0,
-                1.0,
-                1.0,
-                1.0,
-                -1.0,
-                -1.0,
-                1.0,
-                1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-            ]
+            [0, 0, 0, -1.4, 0, -0.4, 0, 1.4, 0, 0.4, 0, -0.4, 0, 0, 0.8, -0.4, 0, -0.4, 0, 0, 0.8, -0.4, 0]
         )
         self.scaling_factor = 0.5
 
         self.previous_action = np.zeros(len(self.agent.robot.ROBOT_MOTORS))
 
-        self.model = load_network(model_path=os.path.join(os.path.dirname(__file__), "nn_walk.onnx"))
+        self.model = load_network(model_path=os.path.join(os.path.dirname(__file__), "new_nn_walk.onnx"))
 
+        meta_path = os.path.join(os.path.dirname(__file__), "new_nn_walk.onnx.meta.json")
+        with open(meta_path) as f:
+            _meta = json.load(f)
+        self.carry = np.zeros((1, _meta["gru_hidden_dim"]), dtype=np.float32)
+
+        self._gait_period = 1.0
+        self._policy_dt = 0.02
+        self.gait_phase_offset = np.array([0.0, -np.pi], dtype=np.float32)
+        self.gait_phase = self.gait_phase_offset.copy()
+        self.gait_phase_dt = (2.0 * np.pi * self._policy_dt) / self._gait_period
+
+    def _wrap_to_pi(self, x):
+        return (x + np.pi) % (2.0 * np.pi) - np.pi
+
+    def _get_gait_phase_features(self):
+        phase_tp1 = self._wrap_to_pi(self.gait_phase + self.gait_phase_dt)
+        return np.concatenate([np.sin(phase_tp1), np.cos(phase_tp1)], axis=-1).astype(np.float32)
+
+    def _step_gait_manager(self):
+        self.gait_phase = self._wrap_to_pi(self.gait_phase + self.gait_phase_dt).astype(np.float32)
 
     def execute(self, reset: bool, target_2d: list, is_target_absolute: bool, orientation: float=None, is_orientation_absolute: bool=True) -> bool:
         
@@ -101,42 +71,42 @@ class Walk(Skill):
         radian_joint_positions = np.deg2rad(list(robot.motor_positions.values()))
         radian_joint_speeds = np.deg2rad(list(robot.motor_speeds.values()))
 
-        qpos_qvel_previous_action = np.vstack(
-            (
-                [
-                    (
-                        (radian_joint_positions * self.train_sim_flip)
-                        - self.joint_nominal_position
-                    )
-                    / 4.6,
-                    radian_joint_speeds / 110.0 * self.train_sim_flip,
-                    self.previous_action / 10.0,
-                ]
-            )
-        ).T.flatten()
+        scaled_joint_pos = (radian_joint_positions - self.joint_nominal_position) / 3.14
+        scaled_joint_vel = radian_joint_speeds / 100.0
+        scaled_previous_action = self.previous_action / 10.0
 
         ang_vel = np.clip(np.deg2rad(robot.gyroscope) / 50.0, -1.0, 1.0)
         orientation_quat_inv = R.from_quat(robot._global_cheat_orientation).inv()
         projected_gravity = orientation_quat_inv.apply(np.array([0.0, 0.0, -1.0]))
-        #[0.5,0.25,0.25]
-        observation = np.concatenate(
-            [
-                qpos_qvel_previous_action,
-                ang_vel,
-                velocity,
-                projected_gravity,
-            ]
-        )
+
+        gait_phase_features = self._get_gait_phase_features()
+
+        observation = np.concatenate([
+            scaled_joint_pos,
+            scaled_joint_vel,
+            scaled_previous_action,
+            ang_vel,
+            velocity,
+            gait_phase_features,
+            projected_gravity,
+        ]).astype(np.float32)
+
+        observation = np.nan_to_num(observation, nan=0.0, posinf=0.0, neginf=0.0)
         observation = np.clip(observation, -10.0, 10.0)
 
-        nn_action = run_network(obs=observation, model=self.model)
-
-        target_joint_positions = (
-            self.joint_nominal_position + self.scaling_factor * nn_action
+        obs_input = observation[np.newaxis, :]
+        session = self.model["session"]
+        nn_action, next_carry = session.run(
+            ["action", "carry_out"],
+            {"obs": obs_input, "carry_in": self.carry}
         )
-        target_joint_positions *= self.train_sim_flip
+        nn_action = nn_action.flatten().astype(np.float32)
+        self.carry = next_carry
+
+        target_joint_positions = self.joint_nominal_position + self.scaling_factor * nn_action
 
         self.previous_action = nn_action
+        self._step_gait_manager()
 
         for idx, target in enumerate(target_joint_positions):
             robot.set_motor_target_position(

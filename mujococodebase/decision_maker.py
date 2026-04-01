@@ -379,9 +379,9 @@ class DecisionMaker:
         _viz_emit(
             player_num=self.agent.world.number,
             team=self.agent.world.team_name,
-            planned_path=self.paths["robot_to_ball"],
+            planned_path=self.paths[path_key],
             grid_scale=self.grid_scale,
-            current_step=self.path_steps["robot_to_ball"],
+            current_step=self.path_steps[path_key],
             current_pos=agent_world_pos,
             target_pos=getattr(self, "_viz_goal_world", None),
         )
