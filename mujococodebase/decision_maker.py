@@ -45,10 +45,13 @@ class DecisionMaker:
 
         # Pathfinding re-plan characteristics
         self.ball_pos_at_last_plan: np.ndarray | None = None # Ball pos during last pathfinding planning
-        self.replan_pos_threshold: float = 0.1 # Minimum distance in meters for replan to occur
-        self.time_at_last_plan: float = 0.0
+        self.replan_pos_threshold: float = 0.2 # Minimum distance in meters for replan to occur
+        self.time_at_last_plan: float = time.time()
         self.replan_cooldown: float = 3.0  # seconds
         self.is_passer: bool = True
+
+        #test
+        self.path_targets = {}
 
         # Pathfinding
         self.planning_threads = []
@@ -79,7 +82,7 @@ class DecisionMaker:
         self.is_passer = self._is_closest_to_ball()
         self._check_global_interrupts()
         self._check_for_replan()
-        print(self._current_state)
+        #print(self._current_state)
 
         match self._current_state:
             case State.BEAMING:
@@ -266,7 +269,7 @@ class DecisionMaker:
         """
         Hold position at the receive point, turning to face ball
         Transitions to GO_TO_BALL if is_passer.
-        Transitions to GO_TO_RECEIVE_POSITION if greater than threshold away from receive position.
+        Transitions to GO_TO_RECEIVE_POSITION if ball has moved more than threshold
         """
 
         if self.is_passer:
@@ -275,16 +278,9 @@ class DecisionMaker:
 
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
-        goal_pos = self.agent.world.field.get_their_goal_position()[:2]
 
-        ball_to_goal = goal_pos - ball_pos
-        ball_to_goal_norm = np.linalg.norm(ball_to_goal)
-        ball_to_goal_dir = ball_to_goal / ball_to_goal_norm if ball_to_goal_norm > 0 else np.zeros(2)
-        receive_distance = min(4.0, 0.5 * ball_to_goal_norm)
-        current_receive_pos = ball_pos + ball_to_goal_dir * receive_distance
-
-        RECEIVE_DRIFT_THRESHOLD = 0.5  # meters
-        if np.linalg.norm(my_pos - current_receive_pos) > RECEIVE_DRIFT_THRESHOLD:
+        BALL_MOVED_THRESHOLD = 1.0  # meters
+        if self.ball_pos_at_last_plan is not None and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan) > BALL_MOVED_THRESHOLD:
             self._enter_state(State.GO_TO_RECEIVE_POSITION)
             return
 
@@ -307,6 +303,15 @@ class DecisionMaker:
         Trigger a full replan if the ball has moved beyond replan_pos_threshold
         since the last plan and the cooldown has elapsed. Skipped until initialized.
         """
+
+        #testing:
+        if time.time() - self.time_at_last_plan > self.replan_cooldown:
+            self._replan()
+            self.time_at_last_plan = time.time()
+
+        return
+
+
         if not self.has_initialized:
             return
         if self.ball_pos_at_last_plan is None:
@@ -345,9 +350,8 @@ class DecisionMaker:
         """
         # if path planning is incomplete, wait
         if not self.path_ready_events[path_key].is_set():
-            last = getattr(self, "_last_waypoints", {}).get(path_key)
-            if last is not None:
-                target_location = np.array(last, dtype=float) / self.grid_scale
+            target_location = self.path_targets.get(path_key)
+            if target_location is not None:
                 self.agent.skills_manager.execute(
                     "Walk",
                     target_2d=target_location,
@@ -374,18 +378,12 @@ class DecisionMaker:
 
         # check if we've arrived and should head to the next waypoint
         agent_location = self.agent.world.global_position[:2]
-        agent_to_target = target_location - agent_location
         PATH_COMPLETE_THRESHOLD = 0.1
         if np.linalg.norm(target_location - agent_location) <= PATH_COMPLETE_THRESHOLD:
             self.path_steps[path_key] += 1
 
     def _replan(self):
         """Discard all current paths and replan."""
-        self._last_waypoints = {
-            key: self.paths[key][self.path_steps[key]] if self.paths[key] and self.path_steps[key] < len(self.paths[key]) else None
-            for key in self.paths
-        }
-
         for key in list(self.paths.keys()):
             self.paths[key] = []
             self.path_ready_events[key].clear()
@@ -393,24 +391,26 @@ class DecisionMaker:
         self.planning_threads = [t for t in self.planning_threads if t.is_alive()]
         self._create_grid_world()
         self._plan_paths()
-        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2]
+        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
         self.time_at_last_plan = time.time()
 
     def _plan_paths(self):
         """
         Plan all necessary paths.
         """
-        for path_key, target in (
-            ("robot_to_ball", self.carry_grid_pos),
-            ("dribble", self.dribble_grid_pos),
-            ("robot_to_receive", self.receive_grid_pos),
+        for path_key, grid_target, world_target in (
+            ("robot_to_ball", self.carry_grid_pos, self.carry_world_pos),
+            ("dribble", self.dribble_grid_pos, self.dribble_world_pos),
+            ("robot_to_receive", self.receive_grid_pos, self.receive_world_pos),
         ):
+            self.path_targets[path_key] = world_target
+
             t = threading.Thread(
                 target=planner,
                 args=(
                     self.grid_world,
                     self.agent_grid_pos,
-                    target,
+                    grid_target,
                     path_key,
                     self.paths,
                     self.path_ready_events,
@@ -471,19 +471,19 @@ class DecisionMaker:
         ])
 
         # Dribble target: 0.30 m *in front of* the ball along the ball-to-goal line.
-        dribble_world_pos = ball_world_pos + ball_to_goal_dir * 0.30
+        self.dribble_world_pos = ball_world_pos + ball_to_goal_dir * 0.30
         self.dribble_grid_pos = np.array([
-            round(dribble_world_pos[0] * self.grid_scale),
-            round(dribble_world_pos[1] * self.grid_scale),
+            round(self.dribble_world_pos[0] * self.grid_scale),
+            round(self.dribble_world_pos[1] * self.grid_scale),
         ])
 
         # Receive position: min of 4 meters from ball to goal along ball-to-goal line,
         # or half way from ball to goal along ball-to-goal line.
         receive_distance = min(4.0, 0.5 * ball_to_goal_norm)
-        receive_world_pos = ball_world_pos + ball_to_goal_dir * receive_distance
+        self.receive_world_pos = ball_world_pos + ball_to_goal_dir * receive_distance
         self.receive_grid_pos = np.array([
-            round(receive_world_pos[0] * self.grid_scale),
-            round(receive_world_pos[1] * self.grid_scale),
+            round(self.receive_world_pos[0] * self.grid_scale),
+            round(self.receive_world_pos[1] * self.grid_scale),
         ])
     
     def _is_closest_to_ball(self) -> bool:
@@ -514,6 +514,12 @@ class DecisionMaker:
         return my_dist <= closest_teammate_dist
 
     def _get_beam_pose(self, random_poses: bool):
+        #temporary override for testing/demonstration:
+        if self.agent.world.number == 1:
+                return (3.0, 0, 0)
+        elif self.agent.world.number == 2:
+            return (1.0, 2.5, 0)
+
         """
         Returns the beam pose (x, y, rotation_deg) for this agent.
 
