@@ -283,4 +283,5 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
             node.score = e(node)
         heapq.heapify(open)
 
+    logger.debug(f"[test1] {path_name} path: {[pos.tolist() for pos in shared_paths[path_name]]}")
     return shared_paths[path_name]
