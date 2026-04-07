@@ -51,8 +51,6 @@ class DecisionMaker:
         self.time_at_last_plan: float = time.time()
         self.replan_cooldown: float = 3.0  # seconds
         self.is_passer: bool = True
-
-        #test
         self.path_targets = {}
 
         # Pathfinding
@@ -241,7 +239,6 @@ class DecisionMaker:
             self._enter_state(State.GO_TO_BALL)
             return
 
-        ball_pos = self.agent.world.ball_pos[:2]
         goal_pos = self.agent.world.field.get_their_goal_position()[:2]
         ball_to_goal = goal_pos - ball_pos
         ball_to_goal_norm = np.linalg.norm(ball_to_goal)
@@ -374,17 +371,18 @@ class DecisionMaker:
         target_location = (np.array(self.paths[path_key][self.path_steps[path_key]][:2], dtype=float) / self.grid_scale)
         target_orientation = self.paths[path_key][self.path_steps[path_key]][2] if len(self.paths[path_key][self.path_steps[path_key]]) > 2 else None
 
-         # ── PATH VIZ ──────────────────────────────────────────────────────────
-        agent_world_pos = self.agent.world.global_position[:2].tolist()
-        _viz_emit(
-            player_num=self.agent.world.number,
-            team=self.agent.world.team_name,
-            planned_path=self.paths["robot_to_ball"],
-            grid_scale=self.grid_scale,
-            current_step=self.path_steps["robot_to_ball"],
-            current_pos=agent_world_pos,
-            target_pos=getattr(self, "_viz_goal_world", None),
-        )
+        # ── PATH VIZ ──────────────────────────────────────────────────────────
+        if False:
+            agent_world_pos = self.agent.world.global_position[:2].tolist()
+            _viz_emit(
+                player_num=self.agent.world.number,
+                team=self.agent.world.team_name,
+                planned_path=self.paths[path_key],
+                grid_scale=self.grid_scale,
+                current_step=self.path_steps[path_key],
+                current_pos=agent_world_pos,
+                target_pos=getattr(self, "_viz_goal_world", None),
+            )
         # ── END VIZ ───────────────────────────────────────────────────────────
 
         self.agent.skills_manager.execute(
@@ -478,7 +476,8 @@ class DecisionMaker:
         self.ball_grid_pos = np.array([
             round(ball_world_pos[0] * self.grid_scale), 
             round(ball_world_pos[1] * self.grid_scale)])
-        
+
+        # convert location of agent to grid coordinates
         agent_world_pos = self.agent.world.global_position[:2] # NOTE: global_position[2] is used for detecting falls and is NOT the 2D orientation
         agent_orientation = self.agent.robot.global_orientation_euler[2]
         self.agent_grid_pos = np.array([
@@ -486,6 +485,9 @@ class DecisionMaker:
             round(agent_world_pos[1] * self.grid_scale),
             MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(agent_orientation) / 45.0))
         ])
+
+        # cache the goal world pos for the viz target marker
+        self._viz_goal_world = list(goal_world_pos)
 
         # Carry position: 0.30 m *behind* the ball along the ball-to-goal line.
         self.carry_world_pos = ball_world_pos - ball_to_goal_dir * 0.30
@@ -526,30 +528,24 @@ class DecisionMaker:
         Returns:
             bool: True if this agent is the closest to the ball, False otherwise.
         """
-        return self.agent.world.number == 1 #temporary fix until teammate visibility is fixed
         ball_pos = self.agent.world.ball_pos[:2]
         my_pos = self.agent.world.global_position[:2]
         my_dist = np.linalg.norm(my_pos - ball_pos)
 
-        visible_teammates = [
+        teammates = [
             player for player in self.agent.world.our_team_players
-            if player.last_seen_time is not None # only consider teammates with a known position
+            if player.last_seen_time is not None # only populated slots
             and np.linalg.norm(player.position[:2] - my_pos) > 0.1 # exclude self
         ]
 
-        if not visible_teammates:
-            return True
+        if not teammates:
+            logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
+            return self.is_passer # hold current role if no teammate data yet
 
-        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in visible_teammates)
+        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
         return my_dist <= closest_teammate_dist
 
     def _get_beam_pose(self, random_poses: bool):
-        #temporary override for testing/demonstration:
-        if self.agent.world.number == 1:
-                return (3.0, 0, 0)
-        elif self.agent.world.number == 2:
-            return (1.0, 2.5, 0)
-
         """
         Returns the beam pose (x, y, rotation_deg) for this agent.
 

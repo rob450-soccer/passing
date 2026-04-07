@@ -75,6 +75,29 @@ class WorldParser:
             robot.global_orientation_euler = np.array([MathOps.normalize_deg(axis_angle) for axis_angle in euler_angles_deg])
             robot.global_orientation_quat = robot._global_cheat_orientation
             world.global_position = world._global_cheat_position
+
+
+            # ---------- START OF VISIBILITY BYPASS ----------
+            # Write own true position to shared file every frame
+            pos = world._global_cheat_position
+            with open(f"/tmp/robot_{world.number}_pos.txt", "w") as f:
+                f.write(f"{pos[0]} {pos[1]} {pos[2]}")
+
+            # Read all other robots' positions from shared files
+            teammate_number = 2 if world.number == 1 else 1
+            try:
+                with open(f"/tmp/robot_{teammate_number}_pos.txt", "r") as f:
+                    values = f.read().split()
+                    if len(values) == 3:
+                        x, y, z = map(float, values)
+                        if not any(np.isnan([x, y, z])):
+                            world.our_team_players[teammate_number - 1].position = np.array([x, y, z])
+                            world.our_team_players[teammate_number - 1].last_seen_time = world.server_time
+            except (FileNotFoundError, ValueError):
+                pass
+            # ---------- END OF VISIBILITY BYPASS ----------
+
+
         except:
             logger.exception(f'Failed to rotate orientation and position considering team side')
             
