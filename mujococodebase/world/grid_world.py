@@ -42,7 +42,7 @@ class GridWorld:
 
     def neighbors(self, pos: np.ndarray[int]) -> list[np.ndarray[int]]:
         """Get a list of the eight neighboring locations of the specified location."""
-        headings = [0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi, -3*np.pi/4, -np.pi/2, -np.pi/4]
+        headings = [-180, -135, -90, -45, 0, 45, 90, 135]
         positions = [
             np.array([pos[0] + 1, pos[1]]),
             np.array([pos[0] - 1, pos[1]]),
@@ -153,7 +153,7 @@ class GridWorld:
 
     def _cartesian_to_array_index(self, position: np.ndarray[int]) -> np.ndarray[int]:
         """Convert from Cartesian coordinates to array indices."""
-        return np.array([position[0] + self.width // 2, self.height // 2 - position[1]])
+        return np.array([int(position[0] + self.width // 2), int(self.height // 2 - position[1])])
 
 class Node:
     """Node for an individual location."""
