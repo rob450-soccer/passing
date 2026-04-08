@@ -383,7 +383,7 @@ class DecisionMaker:
                 current_pos=agent_world_pos,
                 state=self._current_state.name,
                 target_pos=getattr(self, "_viz_goal_world", None),
-                ball_pos=self.agent.world.back_pos[:2].tolist(),
+                ball_pos=list(self.agent.world.ball_pos[:2]),
                 is_passer=self.is_passer,
             )
         # ── END VIZ ───────────────────────────────────────────────────────────
@@ -532,10 +532,10 @@ class DecisionMaker:
 
         if not teammates:
             logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
-            return self.is_passer # hold current role if no teammate data yet
+            return bool(self.is_passer)  # hold current role if no teammate data yet
 
         closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
-        return my_dist <= closest_teammate_dist
+        return bool(my_dist <= closest_teammate_dist)
 
     def _get_beam_pose(self, random_poses: bool):
         """
