@@ -349,7 +349,8 @@ class DecisionMaker:
         """
         # if path planning is incomplete, wait
         if not self.path_ready_events[path_key].is_set():
-            target_location = self.path_targets.get(path_key)
+            target_location = self.path_targets.get(path_key)[:2]
+            target_orientation = self.path_targets.get(path_key)[2] if len(self.path_targets.get(path_key)) > 2 else None
             if target_location is not None:
                 self.agent.skills_manager.execute(
                     "Walk",
@@ -367,9 +368,8 @@ class DecisionMaker:
             return
         
         # Walk to the current waypoint.
-        target_location = (np.array(self.paths[path_key][self.path_steps[path_key]], dtype=float) / self.grid_scale)
-        # TODO: add orientation
-        target_orientation = None
+        target_location = (np.array(self.paths[path_key][self.path_steps[path_key]][:2], dtype=float) / self.grid_scale)
+        target_orientation = self.paths[path_key][self.path_steps[path_key]][2] if len(self.paths[path_key][self.path_steps[path_key]]) > 2 else None
 
         # ── PATH VIZ ──────────────────────────────────────────────────────────
         if True:
@@ -468,6 +468,9 @@ class DecisionMaker:
         y = np.round(goal_world_pos[1] * self.grid_scale + offsets)
         self.goal_grid_pos = np.column_stack((np.full(len(offsets), x), y))
 
+        # cache the goal world pos for the viz target marker
+        self._viz_goal_world = list(goal_world_pos)
+
         # convert location of ball to grid coordinates
         ball_world_pos = self.agent.world.ball_pos[:2]
         ball_to_goal = goal_world_pos - ball_world_pos
@@ -479,35 +482,43 @@ class DecisionMaker:
 
         # convert location of agent to grid coordinates
         agent_world_pos = self.agent.world.global_position[:2] # NOTE: global_position[2] is used for detecting falls and is NOT the 2D orientation
+        agent_orientation = self.agent.robot.global_orientation_euler[2]
         self.agent_grid_pos = np.array([
             round(agent_world_pos[0] * self.grid_scale), 
-            round(agent_world_pos[1] * self.grid_scale)])
-        # TODO: add orientation information
+            round(agent_world_pos[1] * self.grid_scale),
+            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(agent_orientation) / 45.0))
+        ])
 
         # cache the goal world pos for the viz target marker
         self._viz_goal_world = list(goal_world_pos)
 
         # Carry position: 0.30 m *behind* the ball along the ball-to-goal line.
         self.carry_world_pos = ball_world_pos - ball_to_goal_dir * 0.30
+        carry_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
         self.carry_grid_pos = np.array([
             round(self.carry_world_pos[0] * self.grid_scale),
             round(self.carry_world_pos[1] * self.grid_scale),
+            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(carry_orientation) / 45.0))
         ])
 
         # Dribble target: 0.30 m *in front of* the ball along the ball-to-goal line.
         self.dribble_world_pos = ball_world_pos + ball_to_goal_dir * 0.30
+        dribble_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
         self.dribble_grid_pos = np.array([
             round(self.dribble_world_pos[0] * self.grid_scale),
             round(self.dribble_world_pos[1] * self.grid_scale),
+            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(dribble_orientation) / 45.0))
         ])
 
         # Receive position: min of 4 meters from ball to goal along ball-to-goal line,
         # or half way from ball to goal along ball-to-goal line.
         receive_distance = min(4.0, 0.5 * ball_to_goal_norm)
         self.receive_world_pos = ball_world_pos + ball_to_goal_dir * receive_distance
+        receive_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else -180.0
         self.receive_grid_pos = np.array([
             round(self.receive_world_pos[0] * self.grid_scale),
             round(self.receive_world_pos[1] * self.grid_scale),
+            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(receive_orientation) / 45.0))
         ])
     
     def _is_closest_to_ball(self) -> bool:
