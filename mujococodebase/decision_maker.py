@@ -38,6 +38,7 @@ class DecisionMaker:
         """
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
+        self.is_passer: bool = True
 
         # Beaming and initialization
         self.beam_pose = self._get_beam_pose(random_poses=True)
@@ -50,7 +51,6 @@ class DecisionMaker:
         self.replan_pos_threshold: float = 0.2 # Minimum distance in meters for replan to occur
         self.time_at_last_plan: float = time.time()
         self.replan_cooldown: float = 3.0  # seconds
-        self.is_passer: bool = True
         self.path_targets = {}
 
         # Pathfinding
@@ -278,8 +278,8 @@ class DecisionMaker:
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
 
-        BALL_MOVED_THRESHOLD = 1.0  # meters
-        if self.ball_pos_at_last_plan is not None and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan) > BALL_MOVED_THRESHOLD:
+        RECEIVE_POS_MOVED_THRESHOLD = 1.0 # meters
+        if np.linalg.norm(self.my_pos - self.receive_world_pos) > RECEIVE_POS_MOVED_THRESHOLD:
             self._enter_state(State.GO_TO_RECEIVE_POSITION)
             return
 
@@ -299,28 +299,14 @@ class DecisionMaker:
     
     def _check_for_replan(self):
         """
-        Trigger a full replan if the ball has moved beyond replan_pos_threshold
-        since the last plan and the cooldown has elapsed. Skipped until initialized.
+        If has initialized, replan every replan_cooldown seconds.
         """
-
-        #testing:
+        if not self.has_initialized:
+            return
         if time.time() - self.time_at_last_plan > self.replan_cooldown:
             self._replan()
             self.time_at_last_plan = time.time()
-
-        return
-
-
-        if not self.has_initialized:
             return
-        if self.ball_pos_at_last_plan is None:
-            return
-        if time.time() - self.time_at_last_plan < self.replan_cooldown:
-            return
-
-        current_ball_pos = self.agent.world.ball_pos[:2]
-        if np.linalg.norm(current_ball_pos - self.ball_pos_at_last_plan) > self.replan_pos_threshold:
-            self._replan()
 
     # --------------------------------------------------
     # Standard Helpers
@@ -372,7 +358,7 @@ class DecisionMaker:
         target_orientation = self.paths[path_key][self.path_steps[path_key]][2] if len(self.paths[path_key][self.path_steps[path_key]]) > 2 else None
 
         # ── PATH VIZ ──────────────────────────────────────────────────────────
-        if False:
+        if True:
             agent_world_pos = self.agent.world.global_position[:2].tolist()
             _viz_emit(
                 player_num=self.agent.world.number,
