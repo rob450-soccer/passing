@@ -358,7 +358,7 @@ class DecisionMaker:
         target_orientation = self.paths[path_key][self.path_steps[path_key]][2] if len(self.paths[path_key][self.path_steps[path_key]]) > 2 else None
 
         # ── PATH VIZ ──────────────────────────────────────────────────────────
-        if True:
+        if False:
             agent_world_pos = self.agent.world.global_position[:2].tolist()
             _viz_emit(
                 player_num=self.agent.world.number,
