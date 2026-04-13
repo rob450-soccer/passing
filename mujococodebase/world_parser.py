@@ -1,6 +1,12 @@
 import logging
+import struct
 import re
 import numpy as np
+from multiprocessing import shared_memory
+try:
+    from multiprocessing import resource_tracker
+except Exception:  # pragma: no cover - fallback for runtimes without tracker module
+    resource_tracker = None
 from scipy.spatial.transform import Rotation as R
 
 from mujococodebase.utils.math_ops import MathOps
@@ -13,6 +19,83 @@ class WorldParser:
         from mujococodebase.agent import Agent  # type hinting
 
         self.agent: Agent = agent
+        # Shared-memory visibility bypass:
+        # [seq_start, x, y, z, server_time, seq_end]
+        # Reader accepts data only if seq_start == seq_end and non-zero.
+        self._pose_struct = struct.Struct("=qddddq")
+        self._self_pose_seq = 0
+        self._own_pose_shm = None
+        self._teammate_pose_shm = None
+        self._own_pose_shm_created = False
+        self._setup_pose_shared_memory()
+
+    def _setup_pose_shared_memory(self) -> None:
+        world = self.agent.world
+        own_name = f"rob450_pose_{world.number}"
+        teammate_number = 2 if world.number == 1 else 1
+        teammate_name = f"rob450_pose_{teammate_number}"
+
+        self._own_pose_shm = self._open_or_create_own_shared_memory(own_name)
+        self._teammate_shm_name = teammate_name
+        self._try_attach_teammate_shared_memory()
+
+    def _open_or_create_own_shared_memory(self, name: str):
+        try:
+            shm = shared_memory.SharedMemory(
+                name=name, create=True, size=self._pose_struct.size
+            )
+            self._own_pose_shm_created = True
+            self._unregister_from_resource_tracker(shm)
+            return shm
+        except FileExistsError:
+            self._own_pose_shm_created = False
+            shm = shared_memory.SharedMemory(name=name, create=False)
+            self._unregister_from_resource_tracker(shm)
+            return shm
+
+    def _unregister_from_resource_tracker(self, shm) -> None:
+        # We manage shared memory lifecycle explicitly in close(); prevent
+        # multiprocessing's tracker from double-cleanup warnings on shutdown.
+        if resource_tracker is None or shm is None:
+            return
+        try:
+            resource_tracker.unregister(shm._name, "shared_memory")
+        except Exception:
+            pass
+
+    def _try_attach_teammate_shared_memory(self) -> None:
+        if self._teammate_pose_shm is not None:
+            return
+        try:
+            self._teammate_pose_shm = shared_memory.SharedMemory(
+                name=self._teammate_shm_name, create=False
+            )
+            self._unregister_from_resource_tracker(self._teammate_pose_shm)
+        except FileNotFoundError:
+            self._teammate_pose_shm = None
+
+    def close(self) -> None:
+        # Close + unlink only the segment this process created.
+        if self._own_pose_shm is not None:
+            try:
+                self._own_pose_shm.close()
+            except Exception:
+                pass
+            if self._own_pose_shm_created:
+                try:
+                    self._own_pose_shm.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+            self._own_pose_shm = None
+
+        if self._teammate_pose_shm is not None:
+            try:
+                self._teammate_pose_shm.close()
+            except Exception:
+                pass
+            self._teammate_pose_shm = None
 
     def parse(self, message: str) -> None:
         perception_dict: dict = self.__sexpression_to_dict(message)
@@ -83,23 +166,35 @@ class WorldParser:
 
 
             # ---------- START OF VISIBILITY BYPASS ----------
-            # Write own true position to shared file every frame
-            pos = world._global_cheat_position
-            with open(f"/tmp/robot_{world.number}_pos.txt", "w") as f:
-                f.write(f"{pos[0]} {pos[1]} {pos[2]}")
+            # Write own true position to shared memory every frame.
+            if self._own_pose_shm is not None:
+                pos = world._global_cheat_position
+                self._self_pose_seq += 2
+                seq = self._self_pose_seq
+                payload = self._pose_struct.pack(
+                    seq,
+                    float(pos[0]),
+                    float(pos[1]),
+                    float(pos[2]),
+                    float(world.server_time) if world.server_time is not None else 0.0,
+                    seq,
+                )
+                self._own_pose_shm.buf[: self._pose_struct.size] = payload
 
-            # Read all other robots' positions from shared files
+            # Read teammate true position from shared memory.
             teammate_number = 2 if world.number == 1 else 1
-            try:
-                with open(f"/tmp/robot_{teammate_number}_pos.txt", "r") as f:
-                    values = f.read().split()
-                    if len(values) == 3:
-                        x, y, z = map(float, values)
+            if self._teammate_pose_shm is None:
+                self._try_attach_teammate_shared_memory()
+            if self._teammate_pose_shm is not None:
+                try:
+                    raw = bytes(self._teammate_pose_shm.buf[: self._pose_struct.size])
+                    seq_start, x, y, z, teammate_time, seq_end = self._pose_struct.unpack(raw)
+                    if seq_start != 0 and seq_start == seq_end:
                         if not any(np.isnan([x, y, z])):
                             world.our_team_players[teammate_number - 1].position = np.array([x, y, z])
-                            world.our_team_players[teammate_number - 1].last_seen_time = world.server_time
-            except (FileNotFoundError, ValueError):
-                pass
+                            world.our_team_players[teammate_number - 1].last_seen_time = teammate_time
+                except Exception:
+                    pass
             # ---------- END OF VISIBILITY BYPASS ----------
 
 

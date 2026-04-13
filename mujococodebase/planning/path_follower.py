@@ -21,17 +21,19 @@ class PathFollower:
     def __init__(self, agent):
         self.agent = agent
         self.path = None
+        self._last_waypoint_index = 0
 
         # all constants in meters
-        self._PATH_SPACING = 0.5
-        self._SMOOTH_WEIGHT = 0.25
+        self._PATH_SPACING = 0.4
+        self._SMOOTH_WEIGHT = 0.2
         self._PATH_COMPLETE_THRESHOLD = 0.1
-        self._WAYPOINT_LOOKAHEAD = 0.28
+        self._WAYPOINT_LOOKAHEAD = 0.2
 
 
     def set_path(self, path):
         self.path = self._break_path_into_waypoints(path)
         self.path = self._smooth_path(self.path)
+        self._last_waypoint_index = 0
 
     def follow_current_path(self):
         if self.path is None:
@@ -41,12 +43,18 @@ class PathFollower:
             return
 
         closest_waypoint = self._get_next_forward_waypoint(self.path)
+        self._last_waypoint_index = closest_waypoint
         self._walk_to_waypoint(closest_waypoint)
 
     def is_path_complete(self) -> bool:
         if self.path is None:
             return True
         return self._is_path_complete()
+
+    def get_current_waypoint_index(self) -> int:
+        if self.path is None or len(self.path) == 0:
+            return 0
+        return min(self._last_waypoint_index, len(self.path) - 1)
 
     # HELPER FUNCTIONS
 

@@ -341,7 +341,7 @@ class DecisionMaker:
             self.ball_pos_at_last_plan["robot_to_ball"] = ball_pos.copy()
 
         # dribble
-        if (
+        elif (
             self._current_state == State.DRIBBLE
             # time guard
             and current_time - self.time_at_last_plan["dribble"] > self.replan_cooldown["dribble"]
@@ -353,7 +353,7 @@ class DecisionMaker:
             self.ball_pos_at_last_plan["dribble"] = ball_pos.copy()
 
         # robot_to_receive
-        if (
+        elif (
             self._current_state in (State.GO_TO_RECEIVE_POSITION, State.WAIT_FOR_PASS)
             # time guard
             and current_time - self.time_at_last_plan["robot_to_receive"] > self.replan_cooldown["robot_to_receive"]
@@ -428,17 +428,16 @@ class DecisionMaker:
             return
 
         # ── PATH VIZ ──────────────────────────────────────────────────────────
-        if False:
-            agent_world_pos = self.agent.world.global_position[:2].tolist()
-            _viz_emit(
-                player_num=self.agent.world.number,
-                team=self.agent.world.team_name,
-                planned_path=self.paths[path_key],
-                grid_scale=self.grid_scale,
-                current_step=self.path_steps[path_key],
-                current_pos=agent_world_pos,
-                target_pos=getattr(self, "_viz_goal_world", None),
-            )
+        agent_world_pos = self.agent.world.global_position[:2].tolist()
+        _viz_emit(
+            player_num=self.agent.world.number,
+            team=self.agent.world.team_name,
+            planned_path=self.paths[path_key],
+            grid_scale=self.grid_scale,
+            current_step=self.path_follower.get_current_waypoint_index(),
+            current_pos=agent_world_pos,
+            target_pos=getattr(self, "_viz_goal_world", None),
+        )
         # ── END VIZ ───────────────────────────────────────────────────────────
 
         self.path_follower.follow_current_path()

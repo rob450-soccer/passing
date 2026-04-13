@@ -78,4 +78,8 @@ class Agent:
         Logs a shutdown message and closes the server connection.
         """
         logger.info("Shutting down.")
+        try:
+            self.world_parser.close()
+        except Exception:
+            pass
         self.server.shutdown()

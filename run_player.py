@@ -76,7 +76,12 @@ def main() -> None:
         field=args.field,
     )
 
-    player.run()
+    try:
+        player.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        player.shutdown()
 
 
 if __name__ == "__main__":
