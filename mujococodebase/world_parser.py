@@ -45,6 +45,11 @@ class WorldParser:
 
         world.last_server_time = world.server_time
         world.server_time = perception_dict["time"]["now"]
+        dt = (
+            world.server_time - world.last_server_time
+            if world.last_server_time is not None
+            else None
+        )
 
         # Robot parse
 
@@ -106,6 +111,7 @@ class WorldParser:
         robot.accelerometer = np.array(perception_dict["ACC"]["a"])
 
         world.is_ball_pos_updated = False
+        world.ball_velocity = np.zeros(3)
 
         # Vision parse
         if 'See' in perception_dict:
@@ -117,6 +123,7 @@ class WorldParser:
                     
                     polar_coords = np.array(seen_object['pol'])
                     local_cartesian_3d = MathOps.deg_sph2cart(polar_coords)
+                    previous_ball_pos = world.ball_pos.copy()
                     
                     world.ball_pos = MathOps.rel_to_global_3d(
                         local_pos_3d=local_cartesian_3d,
@@ -124,6 +131,8 @@ class WorldParser:
                         global_orientation_quat=robot.global_orientation_quat
                     )
                     world.is_ball_pos_updated = True
+                    if dt is not None and dt > 1e-6:
+                        world.ball_velocity = (world.ball_pos - previous_ball_pos) / dt
                 
                 elif obj_type == "P":
                     

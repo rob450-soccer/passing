@@ -24,7 +24,7 @@ class Agent:
 
         Args:
             team_name (str): The name of the team the agent belongs to.
-            number (int): The player number assigned to this agent.
+            number (int): The player's number within the team.
             host (str): The host address of the simulator server.
             port (int): The port number of the simulator server.
             field (str): The name of the field configuration to use.

@@ -1,16 +1,28 @@
 import argparse
 import logging
 import os
+import sys
 
 from mujococodebase.agent import Agent
 
-ch = logging.StreamHandler()
-formatter = logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-ch.setLevel(logging.INFO)
-logging.basicConfig(handlers=[ch], level=logging.DEBUG)
+
+def _configure_logging(level: int) -> None:
+    """
+    Configure the root logger once. Library modules must not call basicConfig:
+    import order can leave DEBUG enabled and flood stderr (slowing the agent).
+    """
+    ch = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    ch.setFormatter(formatter)
+    ch.setLevel(level)
+    kwargs = {"handlers": [ch], "level": level}
+    if sys.version_info >= (3, 8):
+        kwargs["force"] = True
+    logging.basicConfig(**kwargs)
+
 
 parser = argparse.ArgumentParser(description="Start a MuJoCo Agent.")
 
@@ -38,10 +50,17 @@ parser.add_argument(
     default=None,
     help="Optional custom initial rotation (degrees) for this player.",
 )
+parser.add_argument(
+    "-v",
+    "--verbose",
+    action="store_true",
+    help="Enable DEBUG logging (very noisy; slows the agent loop).",
+)
 
 
 def main() -> None:
     args = parser.parse_args()
+    _configure_logging(logging.DEBUG if args.verbose else logging.INFO)
 
     # Optional single-player custom spawn position.
     if args.spawn_x is not None and args.spawn_y is not None and args.spawn_rot is not None:

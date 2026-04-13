@@ -9,12 +9,12 @@ import numpy as np
 from mujococodebase.utils.math_ops import MathOps
 from mujococodebase.world.play_mode import PlayModeEnum, PlayModeGroupEnum
 from mujococodebase.world.grid_world import GridWorld
-from mujococodebase.world.planning import ana_theta_star as planner
+from mujococodebase.planning.planning import ana_theta_star as planner
+from mujococodebase.planning.path_follower import PathFollower
 from mujococodebase.world.other_robot import OtherRobot
-from mujococodebase.path_viz_emitter import emit as _viz_emit
+from mujococodebase.planning.path_viz_emitter import emit as _viz_emit
 
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__file__)
 
 
@@ -46,15 +46,10 @@ class DecisionMaker:
         self.has_initialized = False
         self.grid_scale: int = 10  # each grid cell = 10 cm in world space
 
-        # Pathfinding re-plan characteristics
-        self.ball_pos_at_last_plan: np.ndarray | None = None # Ball pos during last pathfinding planning
-        self.replan_pos_threshold: float = 0.2 # Minimum distance in meters for replan to occur
-        self.time_at_last_plan: float = time.time()
-        self.replan_cooldown: float = 3.0  # seconds
-        self.path_targets = {}
-
         # Pathfinding
-        self.planning_threads = []
+        self.path_targets = {}
+        self.planning_threads: dict[str, threading.Thread] = {}
+        self.planning_cancel_events: dict[str, threading.Event] = {}
         self.paths = {
             "robot_to_ball": [],
             "dribble": [],
@@ -70,6 +65,23 @@ class DecisionMaker:
             "dribble": 0,
             "robot_to_receive": 0,
         }
+        self.path_follower = PathFollower(agent)
+        self._follower_path_id = None  # id(self.paths[key]) last passed to path_follower.set_path
+        self.ball_pos_at_last_plan: dict[str, np.ndarray] = {
+            "robot_to_ball": np.zeros(2),
+            "dribble": np.zeros(2),
+            "robot_to_receive": np.zeros(2),
+        }
+        self.time_at_last_plan: dict[str, float] = {
+            "robot_to_ball": 0,
+            "dribble": 0,
+            "robot_to_receive": 0,
+        }
+        self.replan_cooldown: dict[str, float] = {
+            "robot_to_ball": 0.5,
+            "dribble": 0.3,
+            "robot_to_receive": 0.7,
+        }
 
     # --------------------------------------------------
     # Core Loop
@@ -81,7 +93,7 @@ class DecisionMaker:
 
         self.is_passer = self._is_closest_to_ball()
         self._check_global_interrupts()
-        self._check_for_replan()
+        self._check_and_replan()
         #print(self._current_state)
 
         match self._current_state:
@@ -158,11 +170,15 @@ class DecisionMaker:
             case State.GO_TO_BALL:
                 pass  # No entry actions yet.
             case State.DRIBBLE:
-                self._replan()
+                # self._replan()
+                self._check_and_replan()
+                pass
             case State.NEUTRAL:
                 pass  # No entry actions yet.
             case State.GO_TO_RECEIVE_POSITION:
-                self._replan()
+                # self._replan()
+                self._check_and_replan()
+                pass
             case State.WAIT_FOR_PASS:
                 pass  # No entry actions yet.
 
@@ -279,7 +295,7 @@ class DecisionMaker:
         ball_pos = self.agent.world.ball_pos[:2]
 
         RECEIVE_POS_MOVED_THRESHOLD = 1.0 # meters
-        if np.linalg.norm(self.my_pos - self.receive_world_pos) > RECEIVE_POS_MOVED_THRESHOLD:
+        if np.linalg.norm(my_pos - self.receive_world_pos) > RECEIVE_POS_MOVED_THRESHOLD:
             self._enter_state(State.GO_TO_RECEIVE_POSITION)
             return
 
@@ -297,16 +313,56 @@ class DecisionMaker:
     # Per-Frame Helpers
     # --------------------------------------------------
     
-    def _check_for_replan(self):
+    def _check_and_replan(self):
         """
         If has initialized, replan every replan_cooldown seconds.
         """
         if not self.has_initialized:
             return
-        if time.time() - self.time_at_last_plan > self.replan_cooldown:
-            self._replan()
-            self.time_at_last_plan = time.time()
+
+        if self._current_state in (State.BEAMING, State.GETTING_UP, State.NEUTRAL):
             return
+        
+        current_time = time.time()
+        my_pos = self.agent.world.global_position[:2]
+        ball_pos = self.agent.world.ball_pos[:2]
+        currently_kicking = self._is_ball_in_kicking_motion(ball_pos)
+
+        # robot_to_ball
+        if (
+            self._current_state == State.GO_TO_BALL
+            # time guard
+            and current_time - self.time_at_last_plan["robot_to_ball"] > self.replan_cooldown["robot_to_ball"]
+            # check if ball has moved enough since last plan, unless it just got kicked
+            and not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_ball"]) >= 0.2
+        ):
+            self._plan_path("robot_to_ball", self.carry_grid_pos, self.carry_world_pos)
+            self.time_at_last_plan["robot_to_ball"] = current_time
+            self.ball_pos_at_last_plan["robot_to_ball"] = ball_pos.copy()
+
+        # dribble
+        if (
+            self._current_state == State.DRIBBLE
+            # time guard
+            and current_time - self.time_at_last_plan["dribble"] > self.replan_cooldown["dribble"]
+            # check if the robot is getting close to the ball and about to kick it
+            and np.linalg.norm(my_pos - self.dribble_world_pos) <= 0.2
+        ):
+            self._plan_path("dribble", self.dribble_grid_pos, self.dribble_world_pos)
+            self.time_at_last_plan["dribble"] = current_time
+            self.ball_pos_at_last_plan["dribble"] = ball_pos.copy()
+
+        # robot_to_receive
+        if (
+            self._current_state in (State.GO_TO_RECEIVE_POSITION, State.WAIT_FOR_PASS)
+            # time guard
+            and current_time - self.time_at_last_plan["robot_to_receive"] > self.replan_cooldown["robot_to_receive"]
+            # check if ball has moved enough since last plan, unless it just got kicked
+            and not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_receive"]) >= 0.5
+        ):
+            self._plan_path("robot_to_receive", self.receive_grid_pos, self.receive_world_pos)
+            self.time_at_last_plan["robot_to_receive"] = current_time
+            self.ball_pos_at_last_plan["robot_to_receive"] = ball_pos.copy()
 
     # --------------------------------------------------
     # Standard Helpers
@@ -315,17 +371,27 @@ class DecisionMaker:
     def _initialize(self) -> None:
         logger.debug("agent initialization")
         self._create_grid_world()
-        self._plan_paths()
-        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
+        for path_key, grid_target, world_target in (
+            ("robot_to_ball", self.carry_grid_pos, self.carry_world_pos),
+            ("dribble", self.dribble_grid_pos, self.dribble_world_pos),
+            ("robot_to_receive", self.receive_grid_pos, self.receive_world_pos),
+        ):
+            self._plan_path(path_key, grid_target, world_target)
         self.has_initialized = True
+
+    def _grid_path_to_world_path(self, grid_path: list) -> np.ndarray:
+        """Grid cells and degrees → meters and degrees for PathFollower."""
+        p = np.asarray(grid_path, dtype=float)
+        if p.size == 0:
+            return np.zeros((0, 3), dtype=float)
+        return np.column_stack((p[:, :2] / float(self.grid_scale), p[:, 2]))
 
     def _follow_path(self, path_key: str, next_state: State, target_orientation: float | None = None) -> None:
         """
         Follow a planned path one waypoint at a time.
 
         Waits in a neutral stance until the planning thread signals the path is
-        ready. Advances through waypoints using a proximity threshold, then
-        transitions to next_state when the path is fully walked.
+        ready. Uses PathFollower on a world-space path (converted from grid).
 
         Args:
             path_key:    Key into self.paths / self.path_ready_events / self.path_steps.
@@ -348,14 +414,18 @@ class DecisionMaker:
                 self.agent.skills_manager.execute("Neutral")
             return
 
-        # if path has been followed, wait
-        if self.path_steps[path_key] >= len(self.paths[path_key]):
+        grid_path = self.paths[path_key]
+        if len(grid_path) == 0:
             self._enter_state(next_state)
             return
-        
-        # Walk to the current waypoint.
-        target_location = (np.array(self.paths[path_key][self.path_steps[path_key]][:2], dtype=float) / self.grid_scale)
-        target_orientation = self.paths[path_key][self.path_steps[path_key]][2] if len(self.paths[path_key][self.path_steps[path_key]]) > 2 else None
+
+        if self._follower_path_id != id(grid_path):
+            self.path_follower.set_path(self._grid_path_to_world_path(grid_path))
+            self._follower_path_id = id(grid_path)
+
+        if self.path_follower.is_path_complete():
+            self._enter_state(next_state)
+            return
 
         # ── PATH VIZ ──────────────────────────────────────────────────────────
         if False:
@@ -371,55 +441,40 @@ class DecisionMaker:
             )
         # ── END VIZ ───────────────────────────────────────────────────────────
 
-        self.agent.skills_manager.execute(
-            "Walk",
-            target_2d=target_location,
-            is_target_absolute=True,
-            orientation=target_orientation,
+        self.path_follower.follow_current_path()
+
+    def _plan_path(self, path_key: str, grid_target: np.ndarray, world_target: np.ndarray):
+        """Plan a single path."""
+        self.path_targets[path_key] = world_target
+        self.path_ready_events[path_key].clear()
+        self.path_steps[path_key] = 0
+
+        # Cancel and replace any in-flight planner for this path.
+        previous_cancel_event = self.planning_cancel_events.get(path_key)
+        if previous_cancel_event is not None:
+            previous_cancel_event.set()
+        previous_thread = self.planning_threads.get(path_key)
+        if previous_thread is not None and previous_thread.is_alive():
+            previous_thread.join(timeout=0.05)
+
+        cancel_event = threading.Event()
+        self.planning_cancel_events[path_key] = cancel_event
+
+        t = threading.Thread(
+            target=planner,
+            args=(
+                self.grid_world,
+                self.agent_grid_pos,
+                grid_target,
+                path_key,
+                self.paths,
+                self.path_ready_events,
+                cancel_event,
+            ),
+            daemon=True,
         )
-
-        # check if we've arrived and should head to the next waypoint
-        agent_location = self.agent.world.global_position[:2]
-        PATH_COMPLETE_THRESHOLD = 0.1
-        if np.linalg.norm(target_location - agent_location) <= PATH_COMPLETE_THRESHOLD:
-            self.path_steps[path_key] += 1
-
-    def _replan(self):
-        """Discard all current paths and replan."""
-        for key in list(self.paths.keys()):
-            self.paths[key] = []
-            self.path_ready_events[key].clear()
-            self.path_steps[key] = 0
-        self.planning_threads = [t for t in self.planning_threads if t.is_alive()]
-        self._create_grid_world()
-        self._plan_paths()
-        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
-        self.time_at_last_plan = time.time()
-
-    def _plan_paths(self):
-        """
-        Plan all necessary paths.
-        """
-        for path_key, grid_target, world_target in (
-            ("robot_to_ball", self.carry_grid_pos, self.carry_world_pos),
-            ("dribble", self.dribble_grid_pos, self.dribble_world_pos),
-            ("robot_to_receive", self.receive_grid_pos, self.receive_world_pos),
-        ):
-            self.path_targets[path_key] = world_target
-
-            t = threading.Thread(
-                target=planner,
-                args=(
-                    self.grid_world,
-                    self.agent_grid_pos,
-                    grid_target,
-                    path_key,
-                    self.paths,
-                    self.path_ready_events,
-                ),
-            )
-            self.planning_threads.append(t)
-            t.start()
+        self.planning_threads[path_key] = t
+        t.start()
 
     def _create_grid_world(self):
         """
@@ -530,6 +585,12 @@ class DecisionMaker:
 
         closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
         return my_dist <= closest_teammate_dist
+
+    def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
+        """
+        Returns True if the ball was kicked and is now in motion.
+        """
+        return np.linalg.norm(ball_velocity) > 0.5 # 0.5 m/s threshold
 
     def _get_beam_pose(self, random_poses: bool):
         """
