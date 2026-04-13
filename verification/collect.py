@@ -13,16 +13,18 @@ DIRS = {
 FIELD = (-4.5, 4.5, -3.0, 3.0)  # xmin, xmax, ymin, ymax
 
 RUN_CONFIG = {
-    "A": {
+    "A": { # test 1
         "stop_trigger": "robot_to_ball path:",
         "timeout":       60,
         "n_players":     1,
+        "reset_ball":    False,   # ball position is set manually via monitor_client
         "log_metrics":  [],
     },
-    "B": {
+    "B": { # test 5
         "stop_trigger": "ball_stopped:",
         "timeout":       90,
         "n_players":     2,
+        "reset_ball":    False,
         "log_metrics":  [
             "joint_angles",
             "joint_torques",
@@ -30,10 +32,11 @@ RUN_CONFIG = {
             "target_pos",
         ],
     },
-    "C": {
+    "C": { #test 6
         "stop_trigger": "ball_stopped:",
         "timeout":       90,
         "n_players":     1,
+        "reset_ball":    False,
         "log_metrics":  [
             "joint_angles",
             "joint_torques",
@@ -41,11 +44,12 @@ RUN_CONFIG = {
             "target_pos",
         ],
     },
-    "D": {
+    "D": { #test 7-8
         "stop_trigger": "scored_at:",
         "timeout":      180,
         "n_players":     2,
-        "log_metrics":  [
+        "reset_ball":    True,    # full game scenario, use default center position
+       "log_metrics":  [
             "com_height",
             "com_z_vel",
             "com_x_vel",
@@ -58,12 +62,14 @@ RUN_CONFIG = {
             "scored_at",
         ],
     },
-    "E": {
+    "E": { #test 9
         "stop_trigger": "reached_ball",
         "timeout":       90,
         "n_players":     1,
-        "log_metrics":  [
+        "reset_ball":    False,
+       "log_metrics":  [
             "velocity",
+            "solo",
         ],
     },
 }
@@ -116,7 +122,12 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
         # Start server
         server, _ = utils.popen_with_logged_output(
             ["hatch", "run", "rcssservermj", "--no-render"],
+            # ["hatch", "run", "rcssservermj"],
             cwd=DIRS["server"], logger=logger, label="server", start_new_session=True,
+            env={
+                **os.environ,
+                "RESET_BALL_ON_KICKOFF": "0" if not config["reset_ball"] else "1",
+            },
         )
         time.sleep(3)
 
@@ -142,12 +153,13 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
 
         # Kickoff
         try:
-            subprocess.run(
-                ["python3", "monitor_client.py", "ball",
-                 f'"(pos {ball_pos[0]} {ball_pos[1]} 0)"'],
-                cwd=DIRS["server"], timeout=2, capture_output=True,
-            )
-            time.sleep(1)
+            if not config["reset_ball"]:
+                subprocess.run(
+                    ["python3", "monitor_client.py", "ball",
+                    f'"(pos {ball_pos[0]} {ball_pos[1]} 0)"'],
+                    cwd=DIRS["server"], timeout=2, capture_output=True,
+                )
+            time.sleep(4)
             subprocess.run(
                 ["python3", "monitor_client.py", "kickOff", "Left"],
                 cwd=DIRS["server"], timeout=2, capture_output=True,
