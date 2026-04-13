@@ -428,16 +428,20 @@ class DecisionMaker:
             return
 
         # ── PATH VIZ ──────────────────────────────────────────────────────────
-        agent_world_pos = self.agent.world.global_position[:2].tolist()
-        _viz_emit(
-            player_num=self.agent.world.number,
-            team=self.agent.world.team_name,
-            planned_path=self.paths[path_key],
-            grid_scale=self.grid_scale,
-            current_step=self.path_follower.get_current_waypoint_index(),
-            current_pos=agent_world_pos,
-            target_pos=getattr(self, "_viz_goal_world", None),
-        )
+        if True:
+            agent_world_pos = self.agent.world.global_position[:2].tolist()
+            _viz_emit(
+                player_num=self.agent.world.number,
+                team=self.agent.world.team_name,
+                planned_path=self.paths[path_key],
+                grid_scale=self.grid_scale,
+                current_step=self.path_steps[path_key],
+                current_pos=agent_world_pos,
+                state=self._current_state.name,
+                target_pos=getattr(self, "_viz_goal_world", None),
+                ball_pos=list(self.agent.world.ball_pos[:2]),
+                is_passer=self.is_passer,
+            )
         # ── END VIZ ───────────────────────────────────────────────────────────
 
         self.path_follower.follow_current_path()
@@ -580,10 +584,16 @@ class DecisionMaker:
 
         if not teammates:
             logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
-            return self.is_passer # hold current role if no teammate data yet
+            return bool(self.is_passer)  # hold current role if no teammate data yet
 
         closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
-        return my_dist <= closest_teammate_dist
+        return bool(my_dist <= closest_teammate_dist)
+
+    def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
+        """
+        Returns True if the ball was kicked and is now in motion.
+        """
+        return np.linalg.norm(ball_velocity) > 0.5 # 0.5 m/s threshold
 
     def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
         """
