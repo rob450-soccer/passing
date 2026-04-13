@@ -27,7 +27,7 @@ class PathFollower:
         self._PATH_SPACING = 0.4
         self._SMOOTH_WEIGHT = 0.2
         self._PATH_COMPLETE_THRESHOLD = 0.1
-        self._WAYPOINT_LOOKAHEAD = 0.2
+        self._WAYPOINT_LOOKAHEAD = 0.15
 
 
     def set_path(self, path):

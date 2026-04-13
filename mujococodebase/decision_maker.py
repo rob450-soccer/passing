@@ -82,6 +82,11 @@ class DecisionMaker:
             "dribble": 0.3,
             "robot_to_receive": 0.7,
         }
+        self.max_no_replan: dict[str, float] = {
+            "robot_to_ball": 3,
+            "dribble": 1.5,
+            "robot_to_receive": 4,
+        }
 
     # --------------------------------------------------
     # Core Loop
@@ -168,7 +173,10 @@ class DecisionMaker:
             case State.GETTING_UP:
                 pass  # No entry actions yet.
             case State.GO_TO_BALL:
-                pass  # No entry actions yet.
+                if self.has_initialized:
+                    # Force a fresh path from the robot's current pose on GO_TO_BALL entry.
+                    self._create_grid_world()
+                    self._plan_path("robot_to_ball", self.carry_grid_pos, self.carry_world_pos)
             case State.DRIBBLE:
                 # self._replan()
                 self._check_and_replan()
@@ -323,46 +331,57 @@ class DecisionMaker:
         if self._current_state in (State.BEAMING, State.GETTING_UP, State.NEUTRAL):
             return
         
+        # Refresh dynamic planning world so replan start/targets use current positions.
+        self._create_grid_world()
+        
         current_time = time.time()
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
         currently_kicking = self._is_ball_in_kicking_motion(ball_pos)
 
+        MUST_REPLAN_THRESHOLD = 6 # proportional to the replan_cooldown
+
         # robot_to_ball
         if (
             self._current_state == State.GO_TO_BALL
-            # time guard
+            # make sure it's not too soon to replan
             and current_time - self.time_at_last_plan["robot_to_ball"] > self.replan_cooldown["robot_to_ball"]
-            # check if ball has moved enough since last plan, unless it just got kicked
-            and not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_ball"]) >= 0.2
+            and (
+                # check if ball has moved enough since last plan, unless it just got kicked
+                not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_ball"]) >= 0.2
+                # check if it's been too long since last plan
+                or current_time - self.time_at_last_plan["robot_to_ball"] > self.max_no_replan["robot_to_ball"]
+            )
         ):
             self._plan_path("robot_to_ball", self.carry_grid_pos, self.carry_world_pos)
-            self.time_at_last_plan["robot_to_ball"] = current_time
-            self.ball_pos_at_last_plan["robot_to_ball"] = ball_pos.copy()
 
         # dribble
         elif (
             self._current_state == State.DRIBBLE
-            # time guard
+            # make sure it's not too soon to replan
             and current_time - self.time_at_last_plan["dribble"] > self.replan_cooldown["dribble"]
-            # check if the robot is getting close to the ball and about to kick it
-            and np.linalg.norm(my_pos - self.dribble_world_pos) <= 0.2
+            and (
+                # check if the robot is getting close to the ball and about to kick it
+                np.linalg.norm(my_pos - self.dribble_world_pos) <= 0.2
+                # check if it's been too long since last plan
+                or current_time - self.time_at_last_plan["dribble"] > self.max_no_replan["dribble"]
+            )
         ):
             self._plan_path("dribble", self.dribble_grid_pos, self.dribble_world_pos)
-            self.time_at_last_plan["dribble"] = current_time
-            self.ball_pos_at_last_plan["dribble"] = ball_pos.copy()
 
         # robot_to_receive
         elif (
             self._current_state in (State.GO_TO_RECEIVE_POSITION, State.WAIT_FOR_PASS)
-            # time guard
+            # make sure it's not too soon to replan
             and current_time - self.time_at_last_plan["robot_to_receive"] > self.replan_cooldown["robot_to_receive"]
-            # check if ball has moved enough since last plan, unless it just got kicked
-            and not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_receive"]) >= 0.5
+            and (
+                # check if ball has moved enough since last plan, unless it just got kicked
+                not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_receive"]) >= 0.5
+                # check if it's been too long since last plan
+                or current_time - self.time_at_last_plan["robot_to_receive"] > self.max_no_replan["robot_to_receive"]
+            )
         ):
             self._plan_path("robot_to_receive", self.receive_grid_pos, self.receive_world_pos)
-            self.time_at_last_plan["robot_to_receive"] = current_time
-            self.ball_pos_at_last_plan["robot_to_receive"] = ball_pos.copy()
 
     # --------------------------------------------------
     # Standard Helpers
@@ -435,7 +454,7 @@ class DecisionMaker:
                 team=self.agent.world.team_name,
                 planned_path=self.paths[path_key],
                 grid_scale=self.grid_scale,
-                current_step=self.path_steps[path_key],
+                current_step=self.path_follower.get_current_waypoint_index(),
                 current_pos=agent_world_pos,
                 state=self._current_state.name,
                 target_pos=getattr(self, "_viz_goal_world", None),
@@ -451,6 +470,8 @@ class DecisionMaker:
         self.path_targets[path_key] = world_target
         self.path_ready_events[path_key].clear()
         self.path_steps[path_key] = 0
+        self.time_at_last_plan[path_key] = time.time()
+        self.ball_pos_at_last_plan[path_key] = self.agent.world.ball_pos[:2].copy()
 
         # Cancel and replace any in-flight planner for this path.
         previous_cancel_event = self.planning_cancel_events.get(path_key)
@@ -588,12 +609,6 @@ class DecisionMaker:
 
         closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
         return bool(my_dist <= closest_teammate_dist)
-
-    def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
-        """
-        Returns True if the ball was kicked and is now in motion.
-        """
-        return np.linalg.norm(ball_velocity) > 0.5 # 0.5 m/s threshold
 
     def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
         """
