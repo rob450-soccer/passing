@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -16,6 +17,9 @@ from mujococodebase.path_viz_emitter import emit as _viz_emit
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__file__)
+
+LOG_METRICS = set(os.environ.get("LOG_METRICS", "").split(","))
+SIM_TIMESTEP = 0.02
 
 
 class State(Enum):
@@ -53,6 +57,8 @@ class DecisionMaker:
         self.replan_cooldown: float = 3.0  # seconds
         self.path_targets = {}
 
+        self._last_position: np.ndarray | None = None
+
         # Pathfinding
         self.planning_threads = []
         self.paths = {
@@ -78,6 +84,33 @@ class DecisionMaker:
     def update_current_behavior(self) -> None:
         if self.agent.world.playmode is PlayModeEnum.GAME_OVER:
             return
+
+        # ── per-timestep metrics ───────────────────────────────────────────
+        if any(m in LOG_METRICS for m in ("velocity", "com_z_vel", "com_x_vel")):
+            now = time.time()
+            pos = self.agent.world.global_position.copy()
+            if self._last_position is not None:
+                vel_vec = (pos - self._last_position) / SIM_TIMESTEP
+                if "velocity" in LOG_METRICS:
+                    print(f"[metric] velocity: {np.linalg.norm(vel_vec[:2]):.4f}", flush=True)
+                if "com_z_vel" in LOG_METRICS:
+                    print(f"[metric] com_z_vel: {vel_vec[2]:.4f}", flush=True)
+                if "com_x_vel" in LOG_METRICS:
+                    print(f"[metric] com_x_vel: {vel_vec[0]:.4f}", flush=True)
+            self._last_position = pos
+
+        if "com_height" in LOG_METRICS:
+            print(f"[metric] com_height: {self.agent.world.global_position[2]:.4f}", flush=True)
+
+        # if "com_z_vel" in LOG_METRICS:
+        #     print(f"[metric] com_z_vel: {self.agent.world.global_linvel[2]:.4f}", flush=True)
+
+        # if "com_x_vel" in LOG_METRICS:
+        #     print(f"[metric] com_x_vel: {self.agent.world.global_linvel[0]:.4f}", flush=True)
+
+        if "latency_ms" in LOG_METRICS:
+            _t0 = time.perf_counter()
+        # ── end metrics setup ──────────────────────────────────────────────
 
         self.is_passer = self._is_closest_to_ball()
         self._check_global_interrupts()
@@ -105,6 +138,20 @@ class DecisionMaker:
             self._initialize()
 
         self.agent.robot.commit_motor_targets_pd()
+
+        # ── post-update metrics ────────────────────────────────────────────
+        if "latency_ms" in LOG_METRICS:
+            elapsed_ms = (time.perf_counter() - _t0) * 1000
+            print(f"[metric] latency_ms: {elapsed_ms:.3f}", flush=True)
+
+        if "joint_torques" in LOG_METRICS:
+            torques = self.agent.robot.get_joint_torques()
+            print(f"[metric] joint_torques: {json.dumps(torques)}", flush=True)
+
+        if "joint_angles" in LOG_METRICS:
+            angles = self.agent.robot.get_joint_angles()
+            print(f"[metric] joint_angles: {json.dumps(angles)}", flush=True)
+        # ── end post-update metrics ────────────────────────────────────────
 
     # --------------------------------------------------
     # State Transitions
@@ -222,6 +269,11 @@ class DecisionMaker:
         orientation = desired_orientation if np.linalg.norm(my_pos - carry_pos) <= 2.0 else None
 
         self._follow_path("robot_to_ball", next_state=State.DRIBBLE, target_orientation=orientation)
+
+        # reached_ball — stop trigger for Run E
+        if "velocity" in LOG_METRICS:
+            if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0:
+                print("[metric] reached_ball", flush=True)
 
     def _state_dribble(self):
         """
@@ -407,17 +459,22 @@ class DecisionMaker:
         ):
             self.path_targets[path_key] = world_target
 
-            t = threading.Thread(
-                target=planner,
-                args=(
-                    self.grid_world,
-                    self.agent_grid_pos,
-                    grid_target,
-                    path_key,
-                    self.paths,
-                    self.path_ready_events,
-                ),
-            )
+            def _make_thread(pk, gt):
+                def _run():
+                    planner(
+                        self.grid_world,
+                        self.agent_grid_pos,
+                        gt,
+                        pk,
+                        self.paths,
+                        self.path_ready_events,
+                    )
+                    # log path once planning thread finishes
+                    # NOTE: collect.py Run A parses this exact format — do not change
+                    logger.debug(f"[test1] {pk} path: {self.paths[pk]}")
+                return _run
+
+            t = threading.Thread(target=_make_thread(path_key, grid_target))
             self.planning_threads.append(t)
             t.start()
 
@@ -429,6 +486,7 @@ class DecisionMaker:
             self.agent.world.field.get_length() * self.grid_scale, 
             self.agent.world.field.get_width() * self.grid_scale
         )
+        # NOTE: collect.py Run A parses this exact format — do not change
         logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
         # add obstacle locations (enemies and teammates, excluding self)
@@ -525,7 +583,8 @@ class DecisionMaker:
         ]
 
         if not teammates:
-            logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
+            if "solo" not in LOG_METRICS:
+                logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
             return self.is_passer # hold current role if no teammate data yet
 
         closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
