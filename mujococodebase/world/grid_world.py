@@ -121,13 +121,21 @@ class GridWorld:
         pos = self._cartesian_to_array_index(position)
         self._grid[pos[0], pos[1]] = value
     
-    def add_obstacle(self, position: np.ndarray[int], inflation_amount: int = 2) -> None:
+    def add_obstacle(self, position: np.ndarray[int], obstacle_radius: int = None, inflation_amount: int = 2) -> None:
         """Add an obstacle and inflate the area around it."""
         pos = self._cartesian_to_array_index(position)
-        self._grid[pos[0], pos[1]] = 1
+        if obstacle_radius is not None:
+            obstacle_radius = 1
+        
+        obstacle_section = self._grid[
+            max(pos[0] - obstacle_radius, 0) : min(pos[0] + obstacle_radius + 1, self._grid.shape[0]),
+            max(pos[1] - obstacle_radius, 0) : min(pos[1] + obstacle_radius + 1, self._grid.shape[1]),
+        ]
+        obstacle_section[obstacle_section == 0] = 1
+
         inflation_section = self._grid[
-            max(pos[0] - inflation_amount, 0) : min(pos[0] + inflation_amount + 1, self._grid.shape[0]),
-            max(pos[1] - inflation_amount, 0) : min(pos[1] + inflation_amount + 1, self._grid.shape[1]),
+            max(pos[0] - (obstacle_radius + inflation_amount), 0) : min(pos[0] + (obstacle_radius + inflation_amount) + 1, self._grid.shape[0]),
+            max(pos[1] - (obstacle_radius + inflation_amount), 0) : min(pos[1] + (obstacle_radius + inflation_amount) + 1, self._grid.shape[1]),
         ]
         inflation_section[inflation_section == 0] = 0.5
 
