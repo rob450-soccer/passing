@@ -24,7 +24,7 @@ class Agent:
 
         Args:
             team_name (str): The name of the team the agent belongs to.
-            number (int): The player number assigned to this agent.
+            number (int): The player's number within the team.
             host (str): The host address of the simulator server.
             port (int): The port number of the simulator server.
             field (str): The name of the field configuration to use.
@@ -79,10 +79,9 @@ class Agent:
         """
         logger.info("Shutting down.")
         try:
-            from mujococodebase.path_viz_emitter import emit_shutdown as _viz_emit_shutdown
-
+            self.world_parser.close()
+            from mujococodebase.planning.path_viz_emitter import emit_shutdown as _viz_emit_shutdown
             _viz_emit_shutdown(player_num=self.world.number, team=self.world.team_name)
         except Exception:
-            # Never let optional viz telemetry interfere with teardown.
             pass
         self.server.shutdown()
