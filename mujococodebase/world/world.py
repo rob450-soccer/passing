@@ -41,6 +41,7 @@ class World:
         self._global_cheat_position: np.ndarray = np.zeros(3)
         self.global_position: np.ndarray = np.zeros(3)
         self.ball_pos: np.ndarray = np.zeros(3)
+        self.ball_velocity: np.ndarray = np.zeros(3)
         self.is_ball_pos_updated: bool = False
         self.our_team_players: list[OtherRobot] = [OtherRobot() for _ in range(self.MAX_PLAYERS_PER_TEAM)]
         self.their_team_players: list[OtherRobot] = [OtherRobot(is_teammate=False) for _ in range(self.MAX_PLAYERS_PER_TEAM)]

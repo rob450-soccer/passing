@@ -1,14 +1,22 @@
 import heapq
 import logging
+import threading
 import numpy as np
 
 from mujococodebase.world.grid_world import GridWorld, Node
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__file__)
 
 
-def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[int], path_name: str, shared_paths: dict, shared_ready_events: dict) -> list[np.ndarray[int]] | None:
+def ana_theta_star(
+    world: GridWorld,
+    start: np.ndarray[int],
+    goal: np.ndarray[int],
+    path_name: str,
+    shared_paths: dict,
+    shared_ready_events: dict,
+    cancel_event: threading.Event | None = None,
+) -> list[np.ndarray[int]] | None:
     """
     Anytime variant that makes progressively better any-angle paths if time is a limiting factor.
     
@@ -46,6 +54,8 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
     def improve_solution():
         nonlocal E, G
         while len(open) > 0:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             current_node = heapq.heappop(open)
 
             # update suboptimality bound
@@ -63,6 +73,8 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
                 return path[::-1]
 
             for neighbor in world.neighbors(current_node.location):
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
                 # skip occupied cells
                 if world.is_occupied(neighbor):
                     continue
@@ -84,9 +96,13 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
 
     # finding the path
     while len(open) > 0:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         new_path = improve_solution()
         if new_path is None:
             break
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         shared_paths[path_name] = new_path
         shared_ready_events[path_name].set()
         # prune nodes that cannot give a shorter path
@@ -95,6 +111,8 @@ def ana_theta_star(world: GridWorld, start: np.ndarray[int], goal: np.ndarray[in
             node.score = e(node)
         heapq.heapify(open)
 
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     logger.debug(f"[test1] {path_name} path: {[pos.tolist() for pos in shared_paths[path_name]]}")
     return shared_paths[path_name]
 

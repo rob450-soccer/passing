@@ -1,6 +1,8 @@
 import logging
 import socket
+import time
 from select import select
+
 from mujococodebase.world_parser import WorldParser
 
 logger = logging.getLogger(__file__)
@@ -16,6 +18,10 @@ class Server:
         self.__send_buff = []
         self.__rcv_buffer_size = 1024
         self.__rcv_buffer = bytearray(self.__rcv_buffer_size)
+        self.__last_thinking_warn_at = 0.0
+        self.__thinking_warn_interval_s = 1.0
+        self.__pending_packet_streak = 0
+        self.__thinking_warn_streak_threshold = 3
 
     def connect(self) -> None:
         logger.info("Connecting to server at %s:%d...", self.__host, self.__port)
@@ -54,10 +60,19 @@ class Server:
         """
         Send all committed messages
         """
-        if len(select([self.__socket], [], [], 0.0)[0]) == 0:
-            self.send_immediate(("".join(self.__send_buff)))
+        if len(select([self.__socket], [], [], 0.0)[0]) != 0:
+            self.__pending_packet_streak += 1
+            now = time.monotonic()
+            if (
+                self.__pending_packet_streak >= self.__thinking_warn_streak_threshold
+                and now - self.__last_thinking_warn_at >= self.__thinking_warn_interval_s
+            ):
+                logger.info("Server received new packets while thinking!")
+                self.__last_thinking_warn_at = now
         else:
-            logger.info("Server_Comm.py: Received a new packet while thinking!")
+            self.__pending_packet_streak = 0
+        # TCP is full-duplex; still send committed commands even if receive data is pending.
+        self.send_immediate(("".join(self.__send_buff)))
         self.__send_buff = []
 
     def commit(self, msg: str) -> None:
