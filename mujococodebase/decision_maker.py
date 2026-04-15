@@ -96,7 +96,7 @@ class DecisionMaker:
         if self.agent.world.playmode is PlayModeEnum.GAME_OVER:
             return
 
-        self.is_passer = self._is_closest_to_ball()
+        self.is_passer = self._is_passer()
         self._check_global_interrupts()
         self._check_and_replan()
         #print(self._current_state)
@@ -603,19 +603,21 @@ class DecisionMaker:
             MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(receive_orientation) / 45.0))
         ])
     
-    def _is_closest_to_ball(self) -> bool:
+    def _is_passer(self) -> bool:
         """
-        Returns True if this agent is closer to the ball than all teammates.
+        Returns True if this agent is closer to a considered pos than all teammates.
+        Considered position is carry_world_pos if it exists. Otherwise, is ball_pos.
 
         Visibility is determined by last_seen_time being set on the OtherRobot object.
         If no teammates are visible, returns True, since it is assumed it is the only player.
 
         Returns:
-            bool: True if this agent is the closest to the ball, False otherwise.
+            bool: True if this agent is the closest to the considered pos. False otherwise.
         """
         ball_pos = self.agent.world.ball_pos[:2]
+        considered_pos = self.carry_world_pos if hasattr(self, "carry_world_pos") else ball_pos
         my_pos = self.agent.world.global_position[:2]
-        my_dist = np.linalg.norm(my_pos - ball_pos)
+        my_dist = np.linalg.norm(my_pos - considered_pos)
 
         teammates = [
             player for player in self.agent.world.our_team_players
@@ -627,7 +629,7 @@ class DecisionMaker:
             logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
             return bool(self.is_passer)  # hold current role if no teammate data yet
 
-        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
+        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - considered_pos) for p in teammates)
         return bool(my_dist <= closest_teammate_dist)
 
     def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
