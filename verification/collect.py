@@ -121,8 +121,8 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
     try:
         # Start server
         server, _ = utils.popen_with_logged_output(
-            ["hatch", "run", "rcssservermj", "--no-render"],
-            # ["hatch", "run", "rcssservermj"],
+            # ["hatch", "run", "rcssservermj", "--no-render"],
+            ["hatch", "run", "rcssservermj"],
             cwd=DIRS["server"], logger=logger, label="server", start_new_session=True,
             env={
                 **os.environ,
