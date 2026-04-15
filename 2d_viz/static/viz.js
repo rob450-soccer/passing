@@ -6,6 +6,9 @@
 // ---------------------------------------------------------------------------
 let FW, FH, FB, GD, GW, GAYD, GAYW, PAD, PAW, CR, PSD;
 let TW, TH; // total canvas world size including border
+const FIELD_IMAGE_PATH = "field_diagram.png";
+const fieldImage = new Image();
+let fieldImageLoaded = false;
 
 // ---------------------------------------------------------------------------
 // State colours — keep in sync with State enum in decision_maker.py
@@ -67,49 +70,13 @@ function drawField() {
   ctx.fillStyle = "#227522";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const lw = Math.max(1, wl(0.05));
-  ctx.lineWidth = lw;
-  ctx.strokeStyle = "#ddd";
-
-  const hw = FW / 2, hh = FH / 2;
-
-  // Outer boundary
-  ctx.strokeRect(wx(-hw), wy(hh), wl(FW), wl(FH));
-
-  // Halfway line
-  ctx.beginPath();
-  ctx.moveTo(wx(0), wy(hh));
-  ctx.lineTo(wx(0), wy(-hh));
-  ctx.stroke();
-
-  // Centre circle
-  ctx.beginPath();
-  ctx.arc(wx(0), wy(0), wl(CR), 0, 2 * Math.PI);
-  ctx.stroke();
-
-  // Centre spot + penalty spots
-  ctx.fillStyle = "#ddd";
-  for (const [x, y] of [[0, 0], [-hw + PSD, 0], [hw - PSD, 0]]) {
-    ctx.beginPath();
-    ctx.arc(wx(x), wy(y), Math.max(2, wl(0.07)), 0, 2 * Math.PI);
-    ctx.fill();
+  // Draw the field diagram image aligned to playable field dimensions.
+  // The border area remains plain green.
+  if (fieldImageLoaded) {
+    const hw = FW / 2;
+    const hh = FH / 2;
+    ctx.drawImage(fieldImage, wx(-hw), wy(hh), wl(FW), wl(FH));
   }
-
-  // Goalie boxes
-  const gah = GAYW / 2;
-  ctx.strokeRect(wx(-hw),       wy(gah), wl(GAYD), wl(GAYW));
-  ctx.strokeRect(wx(hw - GAYD), wy(gah), wl(GAYD), wl(GAYW));
-
-  // Penalty boxes
-  const pah = PAW / 2;
-  ctx.strokeRect(wx(-hw),       wy(pah), wl(PAD), wl(PAW));
-  ctx.strokeRect(wx(hw - PAD),  wy(pah), wl(PAD), wl(PAW));
-
-  // Goals
-  const gw2 = GW / 2;
-  ctx.strokeStyle = "#cccc30";
-  ctx.strokeRect(wx(-hw - GD), wy(gw2), wl(GD), wl(GW));
-  ctx.strokeRect(wx(hw),       wy(gw2), wl(GD), wl(GW));
 }
 
 // ---------------------------------------------------------------------------
@@ -229,37 +196,6 @@ function drawBall(b) {
 }
 
 // ---------------------------------------------------------------------------
-// Drawing: legend
-// ---------------------------------------------------------------------------
-function drawLegend() {
-  const teams = Object.keys(teamCol);
-  if (!teams.length) return;
-
-  const fs = Math.max(9, wl(0.42));
-  ctx.textAlign = "left";
-  let y = 8;
-
-  for (const t of teams) {
-    ctx.fillStyle = teamCol[t];
-    ctx.fillRect(6, y, 10, 10);
-    ctx.font      = `bold ${fs}px monospace`;
-    ctx.fillStyle = "#ccc";
-    ctx.fillText(t, 20, y + 10);
-    y += fs + 5;
-  }
-
-  y += 6;
-  for (const [name, c] of Object.entries(STATE_COLOURS)) {
-    ctx.fillStyle = c;
-    ctx.fillRect(6, y, 10, 10);
-    ctx.font      = `${Math.max(8, fs - 1)}px monospace`;
-    ctx.fillStyle = "#aaa";
-    ctx.fillText(name.replace(/_/g, " ").toLowerCase(), 20, y + 10);
-    y += fs + 3;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Poll loop
 // ---------------------------------------------------------------------------
 const statusEl = document.getElementById("status");
@@ -275,7 +211,6 @@ async function poll() {
     drawField();
     drawAgents(d.agents);
     drawBall(d.ball);
-    drawLegend();
 
     statusEl.textContent = `${d.agents.length} agent(s) — ${new Date().toLocaleTimeString()}`;
     connected = true;
@@ -308,6 +243,10 @@ async function init() {
   PSD  = cfg.PENALTY_SPOT_D;
   TW   = FW + 2 * FB;
   TH   = FH + 2 * FB;
+
+  fieldImage.onload = () => { fieldImageLoaded = true; };
+  fieldImage.onerror = () => { fieldImageLoaded = false; };
+  fieldImage.src = FIELD_IMAGE_PATH;
 
   resize();
   poll();

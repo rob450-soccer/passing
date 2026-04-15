@@ -78,4 +78,11 @@ class Agent:
         Logs a shutdown message and closes the server connection.
         """
         logger.info("Shutting down.")
+        try:
+            from mujococodebase.path_viz_emitter import emit_shutdown as _viz_emit_shutdown
+
+            _viz_emit_shutdown(player_num=self.world.number, team=self.world.team_name)
+        except Exception:
+            # Never let optional viz telemetry interfere with teardown.
+            pass
         self.server.shutdown()

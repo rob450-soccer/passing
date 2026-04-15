@@ -104,7 +104,48 @@ class DecisionMaker:
             not self.has_initialized):
             self._initialize()
 
+        self._emit_viz_tick()
         self.agent.robot.commit_motor_targets_pd()
+
+    def _emit_viz_tick(self) -> None:
+        """
+        Emit one visualizer update every control tick.
+
+        This keeps robots visible before kickoff (NEUTRAL/BEAMING/GETTING_UP),
+        not only while path-following states are active.
+        """
+        path_key_by_state = {
+            State.GO_TO_BALL: "robot_to_ball",
+            State.DRIBBLE: "dribble",
+            State.GO_TO_RECEIVE_POSITION: "robot_to_receive",
+        }
+
+        path_key = path_key_by_state.get(self._current_state)
+        plan = self.paths.get(path_key, []) if path_key else []
+        current_step = self.path_steps.get(path_key, 0) if path_key else 0
+
+        agent_world_pos = self.agent.world.global_position[:2].tolist()
+        # Only publish ball to viz when vision actually updated it this frame.
+        # Otherwise world.ball_pos still holds the last sighting — rebroadcasting
+        # that every tick looks like noise and "sticky" wrong positions; with
+        # multiple agents, stale packets also overwrote fresher ball estimates.
+        ball_pos = (
+            list(self.agent.world.ball_pos[:2])
+            if self.agent.world.is_ball_pos_updated
+            else None
+        )
+        _viz_emit(
+            player_num=self.agent.world.number,
+            team=self.agent.world.team_name,
+            planned_path=plan,
+            grid_scale=self.grid_scale,
+            current_step=current_step,
+            current_pos=agent_world_pos,
+            state=self._current_state.name,
+            target_pos=getattr(self, "_viz_goal_world", None),
+            ball_pos=ball_pos,
+            is_passer=self.is_passer,
+        )
 
     # --------------------------------------------------
     # State Transitions
@@ -356,23 +397,6 @@ class DecisionMaker:
         # Walk to the current waypoint.
         target_location = (np.array(self.paths[path_key][self.path_steps[path_key]][:2], dtype=float) / self.grid_scale)
         target_orientation = self.paths[path_key][self.path_steps[path_key]][2] if len(self.paths[path_key][self.path_steps[path_key]]) > 2 else None
-
-        # ── PATH VIZ ──────────────────────────────────────────────────────────
-        if True:
-            agent_world_pos = self.agent.world.global_position[:2].tolist()
-            _viz_emit(
-                player_num=self.agent.world.number,
-                team=self.agent.world.team_name,
-                planned_path=self.paths[path_key],
-                grid_scale=self.grid_scale,
-                current_step=self.path_steps[path_key],
-                current_pos=agent_world_pos,
-                state=self._current_state.name,
-                target_pos=getattr(self, "_viz_goal_world", None),
-                ball_pos=list(self.agent.world.ball_pos[:2]),
-                is_passer=self.is_passer,
-            )
-        # ── END VIZ ───────────────────────────────────────────────────────────
 
         self.agent.skills_manager.execute(
             "Walk",
