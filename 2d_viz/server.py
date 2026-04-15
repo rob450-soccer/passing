@@ -21,6 +21,13 @@ UDP payload format (agents send JSON to --udp-port):
         "is_passer":    true | false | null
     }
 
+Immediate-removal event:
+    {
+        "event":        "shutdown",
+        "player":       1,
+        "team":         "TeamA"
+    }
+
 All coordinates are world-space metres, origin at field centre, +X right, +Y up.
 Field dimensions default to HLAdult2020 (14 m x 9 m).
 """
@@ -93,6 +100,13 @@ def _udp_thread(port: int) -> None:
             player = int(payload["player"])
             k      = _key(team, player)
             with _lock:
+                if payload.get("event") == "shutdown":
+                    _paths.pop(k, None)
+                    _trails.pop(k, None)
+                    if not _paths:
+                        _ball = None
+                    continue
+
                 if payload.get("ball"):
                     _ball = list(payload["ball"])
                 if payload.get("trail"):
