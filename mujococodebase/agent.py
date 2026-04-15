@@ -24,7 +24,7 @@ class Agent:
 
         Args:
             team_name (str): The name of the team the agent belongs to.
-            number (int): The player number assigned to this agent.
+            number (int): The player's number within the team.
             host (str): The host address of the simulator server.
             port (int): The port number of the simulator server.
             field (str): The name of the field configuration to use.
@@ -78,4 +78,8 @@ class Agent:
         Logs a shutdown message and closes the server connection.
         """
         logger.info("Shutting down.")
+        try:
+            self.world_parser.close()
+        except Exception:
+            pass
         self.server.shutdown()
