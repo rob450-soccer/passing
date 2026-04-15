@@ -80,6 +80,8 @@ class Agent:
         logger.info("Shutting down.")
         try:
             self.world_parser.close()
+            from mujococodebase.planning.path_viz_emitter import emit_shutdown as _viz_emit_shutdown
+            _viz_emit_shutdown(player_num=self.world.number, team=self.world.team_name)
         except Exception:
             pass
         self.server.shutdown()

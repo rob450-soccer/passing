@@ -121,6 +121,7 @@ class DecisionMaker:
             not self.has_initialized):
             self._initialize()
 
+        self._emit_viz_tick()
         self.agent.robot.commit_motor_targets_pd()
 
     # --------------------------------------------------
@@ -382,6 +383,42 @@ class DecisionMaker:
             )
         ):
             self._plan_path("robot_to_receive", self.receive_grid_pos, self.receive_world_pos)
+    
+    def _emit_viz_tick(self) -> None:
+        """
+        Emit one visualizer update every control tick.
+
+        This keeps robots visible before kickoff (NEUTRAL/BEAMING/GETTING_UP),
+        not only while path-following states are active.
+        """
+        path_key_by_state = {
+            State.GO_TO_BALL: "robot_to_ball",
+            State.DRIBBLE: "dribble",
+            State.GO_TO_RECEIVE_POSITION: "robot_to_receive",
+        }
+
+        path_key = path_key_by_state.get(self._current_state)
+        plan = self.paths.get(path_key, []) if path_key else []
+        current_step = self.path_follower.get_current_waypoint_index(),
+
+        agent_world_pos = self.agent.world.global_position[:2].tolist()
+        ball_pos = (
+            list(self.agent.world.ball_pos[:2])
+            if self.agent.world.is_ball_pos_updated
+            else None
+        )
+        _viz_emit(
+            player_num=self.agent.world.number,
+            team=self.agent.world.team_name,
+            planned_path=plan,
+            grid_scale=self.grid_scale,
+            current_step=current_step,
+            current_pos=agent_world_pos,
+            state=self._current_state.name,
+            target_pos=getattr(self, "_viz_goal_world", None),
+            ball_pos=ball_pos,
+            is_passer=self.is_passer,
+        )
 
     # --------------------------------------------------
     # Standard Helpers
@@ -437,7 +474,7 @@ class DecisionMaker:
         if len(grid_path) == 0:
             self._enter_state(next_state)
             return
-
+        
         if self._follower_path_id != id(grid_path):
             self.path_follower.set_path(self._grid_path_to_world_path(grid_path))
             self._follower_path_id = id(grid_path)
@@ -445,23 +482,6 @@ class DecisionMaker:
         if self.path_follower.is_path_complete():
             self._enter_state(next_state)
             return
-
-        # ── PATH VIZ ──────────────────────────────────────────────────────────
-        if True:
-            agent_world_pos = self.agent.world.global_position[:2].tolist()
-            _viz_emit(
-                player_num=self.agent.world.number,
-                team=self.agent.world.team_name,
-                planned_path=self.paths[path_key],
-                grid_scale=self.grid_scale,
-                current_step=self.path_follower.get_current_waypoint_index(),
-                current_pos=agent_world_pos,
-                state=self._current_state.name,
-                target_pos=getattr(self, "_viz_goal_world", None),
-                ball_pos=list(self.agent.world.ball_pos[:2]),
-                is_passer=self.is_passer,
-            )
-        # ── END VIZ ───────────────────────────────────────────────────────────
 
         self.path_follower.follow_current_path()
 
