@@ -415,6 +415,7 @@ class DecisionMaker:
             current_step=current_step,
             current_pos=agent_world_pos,
             state=self._current_state.name,
+            play_mode=self.agent.world.playmode.name,
             target_pos=getattr(self, "_viz_goal_world", None),
             ball_pos=ball_pos,
             is_passer=self.is_passer,

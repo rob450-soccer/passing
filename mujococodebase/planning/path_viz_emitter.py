@@ -32,6 +32,7 @@ def emit(
     current_step: int,               # index of the waypoint we're currently targeting
     current_pos: list,               # [x, y] world coords — agent's live position
     state: str = "",                 # FSM state name, e.g. "GO_TO_BALL"
+    play_mode: str = "",             # current simulator play mode
     target_pos: list | None = None,  # [x, y] world coords — pass/goal target
     ball_pos: list | None = None,    # [x, y] world coords — ball position
     is_passer: bool | None = None,   # whether this agent is the designated passer
@@ -56,6 +57,7 @@ def emit(
         "current_step": current_step,
         "trail":        [current_pos],   # viz server accumulates these over time
         "state":        state,
+        "play_mode":    play_mode,
         "target":       list(target_pos) if target_pos is not None else None,
         "ball":         list(ball_pos)   if ball_pos  is not None else None,
         "is_passer":    is_passer,
