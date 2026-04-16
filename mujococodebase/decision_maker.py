@@ -40,7 +40,7 @@ class DecisionMaker:
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
         self.is_passer: bool = True
-        self.scoring_distance: float = 6.0
+        self.scoring_distance: float = 3.0
 
         # Beaming and initialization
         self.beam_pose = self._get_beam_pose(random_poses=True)
@@ -650,8 +650,8 @@ class DecisionMaker:
         # cache the goal world pos for the viz target marker
         self._viz_goal_world = list(goal_world_pos)
 
-        # Carry position: 0.30 m *behind* the ball along the ball-to-goal line.
-        self.carry_world_pos = ball_world_pos - ball_to_goal_dir * 0.30
+        # Carry position: 0.20 m *behind* the ball along the ball-to-goal line.
+        self.carry_world_pos = ball_world_pos - ball_to_goal_dir * 0.20
         carry_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
         self.carry_grid_pos = np.array([
             round(self.carry_world_pos[0] * self.grid_scale),
@@ -659,8 +659,8 @@ class DecisionMaker:
             MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(carry_orientation) / 45.0))
         ])
 
-        # Scoring target: 0.30 m *in front of* the ball along the ball-to-goal line.
-        self.scoring_world_pos = ball_world_pos + ball_to_goal_dir * 0.30
+        # Scoring target: 0.20 m *in front of* the ball along the ball-to-goal line.
+        self.scoring_world_pos = ball_world_pos + ball_to_goal_dir * 0.20
         scoring_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
         self.scoring_grid_pos = np.array([
             round(self.scoring_world_pos[0] * self.grid_scale),
@@ -679,10 +679,10 @@ class DecisionMaker:
             MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(receive_orientation) / 45.0))
         ])
 
-        # Passing target: 0.30 m *in front of* the ball along the ball-to-receive line.
+        # Passing target: 0.20 m *in front of* the ball along the ball-to-receive line.
         ball_to_receive = self.receive_world_pos - ball_world_pos
         ball_to_receive_norm = np.linalg.norm(ball_to_receive)
-        self.passing_world_pos = ball_world_pos + ball_to_receive * 0.30
+        self.passing_world_pos = ball_world_pos + ball_to_receive * 0.20
         passing_orientation = MathOps.vector_angle(ball_to_receive) if ball_to_receive_norm > 0 else 0.0
         self.passing_grid_pos = np.array([
             round(self.passing_world_pos[0] * self.grid_scale),
