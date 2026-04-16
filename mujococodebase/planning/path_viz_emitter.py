@@ -65,3 +65,27 @@ def emit(
         _get_sock().sendto(json.dumps(payload).encode(), (host, port))
     except OSError:
         pass  # never let the visualizer crash the agent
+
+
+def emit_shutdown(
+    player_num: int,
+    team: str,
+    host: str = _DEFAULT_HOST,
+    port: int = _DEFAULT_PORT,
+) -> None:
+    """
+    Send an explicit visualizer shutdown packet for one agent.
+
+    This lets the viz server remove the agent immediately instead of waiting
+    for any timeout-based expiry.
+    """
+    payload = {
+        "event": "shutdown",
+        "player": player_num,
+        "team": team,
+    }
+
+    try:
+        _get_sock().sendto(json.dumps(payload).encode(), (host, port))
+    except OSError:
+        pass
