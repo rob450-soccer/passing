@@ -50,14 +50,6 @@ class DecisionMaker:
         self.has_initialized = False
         self.grid_scale: int = 10  # each grid cell = 10 cm in world space
 
-        # Pathfinding re-plan characteristics
-        self.ball_pos_at_last_plan: np.ndarray | None = None # Ball pos during last pathfinding planning
-        self.replan_pos_threshold: float = 0.2 # Minimum distance in meters for replan to occur
-        self.time_at_last_plan: float = time.time()
-        self.replan_cooldown: float = 3.0  # seconds
-
-        self._last_position: np.ndarray | None = None
-
         # Pathfinding
         self.path_targets = {}
         self.planning_threads: dict[str, threading.Thread] = {}
@@ -575,54 +567,8 @@ class DecisionMaker:
             ),
             daemon=True,
         )
-
-        # check if we've arrived and should head to the next waypoint
-        agent_location = self.agent.world.global_position[:2]
-        PATH_COMPLETE_THRESHOLD = 0.1
-        if np.linalg.norm(target_location - agent_location) <= PATH_COMPLETE_THRESHOLD:
-            self.path_steps[path_key] += 1
-
-    def _replan(self):
-        """Discard all current paths and replan."""
-        for key in list(self.paths.keys()):
-            self.paths[key] = []
-            self.path_ready_events[key].clear()
-            self.path_steps[key] = 0
-        self.planning_threads = [t for t in self.planning_threads if t.is_alive()]
-        self._create_grid_world()
-        self._plan_paths()
-        self.ball_pos_at_last_plan = self.agent.world.ball_pos[:2].copy()
-        self.time_at_last_plan = time.time()
-
-    def _plan_paths(self):
-        """
-        Plan all necessary paths.
-        """
-        for path_key, grid_target, world_target in (
-            ("robot_to_ball", self.carry_grid_pos, self.carry_world_pos),
-            ("dribble", self.dribble_grid_pos, self.dribble_world_pos),
-            ("robot_to_receive", self.receive_grid_pos, self.receive_world_pos),
-        ):
-            self.path_targets[path_key] = world_target
-
-            def _make_thread(pk, gt):
-                def _run():
-                    planner(
-                        self.grid_world,
-                        self.agent_grid_pos,
-                        gt,
-                        pk,
-                        self.paths,
-                        self.path_ready_events,
-                    )
-                    # log path once planning thread finishes
-                    # NOTE: collect.py Run A parses this exact format — do not change
-                    logger.debug(f"[test1] {pk} path: {self.paths[pk]}")
-                return _run
-
-            t = threading.Thread(target=_make_thread(path_key, grid_target))
-            self.planning_threads.append(t)
-            t.start()
+        self.planning_threads[path_key] = t
+        t.start()
 
     def _create_grid_world(self):
         """
@@ -632,7 +578,6 @@ class DecisionMaker:
             self.agent.world.field.get_length() * self.grid_scale, 
             self.agent.world.field.get_width() * self.grid_scale
         )
-        # NOTE: collect.py Run A parses this exact format — do not change
         logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
         # add obstacle locations (enemies and teammates, excluding self)
@@ -640,7 +585,7 @@ class DecisionMaker:
         obstacles += [player for player in self.agent.world.our_team_players if player.last_seen_time is not None and player is not self.agent]
         for robot in obstacles:
             pos = robot.position
-            logger.debug(f"Obstacle at {pos}")
+            # logger.debug(f"Obstacle at {pos}")
             self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), inflation_amount=6)
 
         # convert location of line in front of the goal to grid coordinates

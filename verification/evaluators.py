@@ -62,8 +62,8 @@ def extract_paths_and_scale(log_lines: list[str]):
         if "grid world created with scale" in line:
             scale = parse_scale(line)
         for trigger, idx in [("robot_to_ball path:", 0),
-                              ("robot_to_goal path:", 1),
-                              ("ball_to_goal path:",  2)]:
+                              ("dribble path:", 1),
+                              ("robot_to_receive path:",  2)]:
             if trigger in line:
                 paths[idx] = parse_path(line)
     return [paths[i] for i in sorted(paths)], scale

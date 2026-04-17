@@ -4,8 +4,24 @@ import utils
 from schema import TrialData
 import os
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SERVER_CANDIDATES = ("../../RCSSServerMJ", "../../rcssservermj")
+
+
+def _resolve_server_dir() -> str:
+    """Return the first existing server directory among supported names."""
+    for rel_path in SERVER_CANDIDATES:
+        abs_path = os.path.normpath(os.path.join(BASE_DIR, rel_path))
+        if os.path.isdir(abs_path):
+            return rel_path
+    raise FileNotFoundError(
+        "Could not find simulation server directory. Expected one of: "
+        + ", ".join(SERVER_CANDIDATES)
+    )
+
+
 DIRS = {
-    "server":    "../../RCSSServerMJ",
+    "server":    _resolve_server_dir(),
     "player":    "..",
     "obstacles": "../../obstacles",
 }
@@ -14,11 +30,11 @@ FIELD = (-4.5, 4.5, -3.0, 3.0)  # xmin, xmax, ymin, ymax
 
 RUN_CONFIG = {
     "A": { # test 1
-        "stop_trigger": "robot_to_ball path:",
+        "stop_trigger": ["robot_to_ball path:", "dribble path:", "robot_to_receive path:"],
         "timeout":       60,
         "n_players":     1,
         "reset_ball":    False,   # ball position is set manually via monitor_client
-        "log_metrics":  [],
+        "log_metrics":  ["solo"],
     },
     "B": { # test 5
         "stop_trigger": "ball_stopped:",
@@ -85,7 +101,8 @@ def _spawn_player(number: int, start_pos: tuple, config: dict, dirs: dict) -> su
          "-n", str(number), "-t", "Team",
          "--spawn-x",   str(start_pos[0]),
          "--spawn-y",   str(start_pos[1]),
-         "--spawn-rot", "0"],
+         "--spawn-rot", "0", 
+         "--verbose"],
         cwd=dirs["player"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         start_new_session=True,
@@ -103,6 +120,10 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
     Log lines are only collected from player 1 — it is always the passer.
     """
     config = RUN_CONFIG[run_id]
+    stop_triggers = config["stop_trigger"]
+    if isinstance(stop_triggers, str):
+        stop_triggers = [stop_triggers]
+    pending_triggers = set(stop_triggers)
     seed   = random.randint(0, 99999)
     data   = TrialData(
         run_id          = run_id,
@@ -121,8 +142,8 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
     try:
         # Start server
         server, _ = utils.popen_with_logged_output(
-            # ["hatch", "run", "rcssservermj", "--no-render"],
-            ["hatch", "run", "rcssservermj"],
+            ["hatch", "run", "rcssservermj", "--no-render"],
+            # ["hatch", "run", "rcssservermj"],
             cwd=DIRS["server"], logger=logger, label="server", start_new_session=True,
             env={
                 **os.environ,
@@ -184,7 +205,8 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
             data.log_lines.append(line)
             _parse_line(line, data)
 
-            if config["stop_trigger"] in line:
+            pending_triggers = {trigger for trigger in pending_triggers if trigger not in line}
+            if not pending_triggers:
                 break
 
             if time.time() - start_time > config["timeout"]:
