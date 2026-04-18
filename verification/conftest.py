@@ -4,6 +4,8 @@
 import pytest
 import re
 from collections import defaultdict
+from pathlib import Path
+import xml.etree.ElementTree as ET
 from schema import TrialData
 
 @pytest.fixture(scope="session")
@@ -21,7 +23,40 @@ def run_d(): return TrialData.load_run("D")
 @pytest.fixture(scope="session")
 def run_e(): return TrialData.load_run("E")
 
-JOINT_LIMITS = {f"joint_{i}": (-90.0, 90.0) for i in range(23)}
+def _load_joint_limits_from_robot_xml() -> dict[str, tuple[float, float]]:
+    """
+    Load hinge-joint limits from the ant robot model.
+    """
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        base_dir / "../../rcssservermj/src/rcsssmj/resources/robots/ant/robot.xml",
+        base_dir / "../../RCSSServerMJ/src/rcsssmj/resources/robots/ant/robot.xml",
+    ]
+
+    robot_xml_path = next((p.resolve() for p in candidates if p.exists()), None)
+    if robot_xml_path is None:
+        raise FileNotFoundError("Could not locate ant robot.xml for JOINT_LIMITS.")
+
+    root = ET.parse(robot_xml_path).getroot()
+    limits: dict[str, tuple[float, float]] = {}
+
+    for joint in root.findall(".//joint[@type='hinge'][@range]"):
+        name = joint.attrib.get("name")
+        range_str = joint.attrib.get("range", "")
+        if not name:
+            continue
+        parts = range_str.split()
+        if len(parts) != 2:
+            continue
+        lo, hi = float(parts[0]), float(parts[1])
+        limits[name] = (lo, hi)
+
+    if not limits:
+        raise ValueError(f"No hinge joint limits found in {robot_xml_path}")
+    return limits
+
+
+JOINT_LIMITS = _load_joint_limits_from_robot_xml()
 DURATION_MIN = 1.0
 
 _PARAM_ID_RE = re.compile(r"\[([^\]]+)\]\s*$")

@@ -39,6 +39,16 @@ def path_hits_obstacle(path, obstacles, min_dist=MIN_SAFE_DIST) -> bool:
                 return True
     return False
 
+def kick_error(trial: TrialData) -> float | None:
+    """Return Euclidean error between final ball position and target."""
+    if not trial.ball_final_pos or not trial.ball_target_pos:
+        return None
+
+    return math.hypot(
+        trial.ball_final_pos[0] - trial.ball_target_pos[0],
+        trial.ball_final_pos[1] - trial.ball_target_pos[1],
+    )
+
 
 # ── log parsing ───────────────────────────────────────────────────────────────
 
@@ -88,28 +98,30 @@ def check_paths(trial: TrialData) -> tuple[bool, str]:
 
 # ── Tests 5 & 6 ───────────────────────────────────────────────────────────────
 
-def check_kick(trial: TrialData, error_threshold: float,
-               joint_limits: dict) -> tuple[bool, str]:
-    """Tests 5A/6A (accuracy), 5B/6B (torque), 5C/6C (joint limits)."""
-    if not trial.ball_final_pos or not trial.ball_target_pos:
+def check_kick_accuracy(trial: TrialData, error_threshold: float) -> tuple[bool, str]:
+    """Tests 5A/6A (accuracy)."""
+    err = kick_error(trial)
+    if err is None:
         return False, "ball position not logged"
-
-    err = math.hypot(trial.ball_final_pos[0] - trial.ball_target_pos[0],
-                     trial.ball_final_pos[1] - trial.ball_target_pos[1])
     if err > error_threshold:
         return False, f"kick error {err:.2f}m > {error_threshold}m"
+    return True, ""
 
+def check_kick_torque(trial: TrialData) -> tuple[bool, str]:
+    """Tests 5B/6B (torque)."""
     if trial.joint_torques:
         max_t = max(abs(v) for step in trial.joint_torques for v in step.values())
         if max_t > MAX_TORQUE:
             return False, f"torque {max_t:.1f} Nm > {MAX_TORQUE} Nm"
+    return True, ""
 
+def check_kick_joint_limits(trial: TrialData, joint_limits: dict) -> tuple[bool, str]:
+    """Tests 5C/6C (joint limits)."""
     for step in trial.joint_angles:
         for joint, angle in step.items():
             lo, hi = joint_limits.get(joint, (-180.0, 180.0))
             if not (lo - JOINT_MARGIN <= angle <= hi + JOINT_MARGIN):
-                return False, f"joint {joint} angle {angle:.1f}° out of limits"
-
+                return False, f"joint {joint} angle {angle:.1f}° out of limits ({lo:.1f}°, {hi:.1f}°)"
     return True, ""
 
 
