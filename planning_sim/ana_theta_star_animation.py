@@ -1,5 +1,6 @@
 import argparse
 import heapq
+import threading
 import time
 from dataclasses import dataclass
 
@@ -21,8 +22,18 @@ class StepFrame:
     path: list[tuple[int, int]] | None = None
 
 
-def distance_to_goal(start: Node, goal: tuple[int, int]) -> float:
-    return start.distance_to(Node(goal))
+def distance_to_goal(start: Node, goal: np.ndarray | tuple[int, ...]) -> float:
+    """Match mujococodebase/planning/planning.py: single goal or closest of multiple goals."""
+    g = np.asarray(goal)
+    loc = np.asarray(start.location)
+    if g.ndim == 1:
+        return float(np.linalg.norm(loc - g))
+    return float(np.min(np.linalg.norm(loc - g, axis=1)))
+
+
+def goal_reached(location: tuple[int, ...], goal: np.ndarray | tuple[int, ...]) -> bool:
+    """Match planning.py goal test: np.any(np.all(current_node.location == np.atleast_2d(goal), axis=1))."""
+    return bool(np.any(np.all(np.asarray(location) == np.atleast_2d(np.asarray(goal)), axis=1)))
 
 
 def make_demo_grid(rows: int = 30, cols: int = 30) -> np.ndarray:
@@ -56,7 +67,8 @@ def make_demo_grid(rows: int = 30, cols: int = 30) -> np.ndarray:
 def ana_theta_star_trace(
     world: GridWorld,
     start: tuple[int, int],
-    goal: tuple[int, int],
+    goal: tuple[int, int] | np.ndarray,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[tuple[int, int]] | None, list[StepFrame]]:
     start_node = Node(start)
     start_node.g = 0
@@ -67,7 +79,7 @@ def ana_theta_star_trace(
 
     open_nodes = [start_node]
     heapq.heapify(open_nodes)
-    g_scores = {start: 0.0}
+    g_scores: dict[Node, float] = {start_node: 0.0}
     frames: list[StepFrame] = []
     expansions = 0
     improve_calls = 0
@@ -100,6 +112,8 @@ def ana_theta_star_trace(
             f"best_cost={'inf' if G == float('inf') else f'{G:.3f}'}"
         )
         while len(open_nodes) > 0:
+            if cancel_event is not None and cancel_event.is_set():
+                return None, "cancelled"
             current_node = heapq.heappop(open_nodes)
             expansions += 1
             if expansions % 100 == 0:
@@ -111,7 +125,7 @@ def ana_theta_star_trace(
             if current_node.score < E:
                 E = current_node.score
 
-            if current_node.location == goal:
+            if goal_reached(current_node.location, goal):
                 G = current_node.g
                 found_path = reconstruct_path(current_node)
                 elapsed_ms = (time.perf_counter() - trace_start_time) * 1000.0
@@ -135,6 +149,8 @@ def ana_theta_star_trace(
             selected: list[tuple[int, int]] = []
 
             for neighbor in world.neighbors(current_node.location):
+                if cancel_event is not None and cancel_event.is_set():
+                    return None, "cancelled"
                 if world.is_occupied(neighbor):
                     continue
 
@@ -147,12 +163,12 @@ def ana_theta_star_trace(
                 else:
                     g = current_node.g + current_node.distance_to(neighbor_node)
 
-                if g < g_scores.get(neighbor, float("inf")):
+                if g < g_scores.get(neighbor_node, float("inf")):
                     neighbor_node.g = g
                     neighbor_node.h = distance_to_goal(neighbor_node, goal)
                     if neighbor_node.g + neighbor_node.h < G:
                         neighbor_node.score = e(neighbor_node)
-                        g_scores[neighbor] = g
+                        g_scores[neighbor_node] = g
                         selected.append(neighbor)
                         heapq.heappush(open_nodes, neighbor_node)
 
@@ -172,14 +188,20 @@ def ana_theta_star_trace(
         return None, "frontier_exhausted"
 
     while len(open_nodes) > 0:
+        if cancel_event is not None and cancel_event.is_set():
+            print("[trace] stop: cancel_event set")
+            break
         open_before_prune = len(open_nodes)
         new_path, reason = improve_solution()
         if new_path is None:
             print(f"[trace] stop: improve_solution returned None ({reason})")
             break
+        if cancel_event is not None and cancel_event.is_set():
+            print("[trace] stop: cancel_event set after pass")
+            break
         best_path = new_path
 
-        # Same pruning/re-scoring structure as ana_theta_star in planning.py
+        # Same pruning/re-scoring structure as ana_theta_star in mujococodebase/planning/planning.py
         open_nodes = [node for node in open_nodes if node.g + node.h < G]
         pruned_count = open_before_prune - len(open_nodes)
         for node in open_nodes:
@@ -189,6 +211,9 @@ def ana_theta_star_trace(
             f"[trace] post-pass {improve_calls} prune | removed={pruned_count} | "
             f"remaining_open={len(open_nodes)} | best_cost={G:.3f}"
         )
+
+    if cancel_event is not None and cancel_event.is_set():
+        return None, frames
 
     if best_path is None:
         print(
@@ -241,8 +266,8 @@ def animate_trace(
     base[grid_world._grid >= 1] = 2
 
     img = ax.imshow(base, cmap=cmap, vmin=0, vmax=7, interpolation="none")
-    path_line, = ax.plot([], [], color="#d55e00", linewidth=4, solid_capstyle="round")
-    old_paths_collection = LineCollection([], colors="#f4c7a1", linewidths=2, alpha=0.9)
+    path_line, = ax.plot([], [], color="#d55e00", linewidth=12, solid_capstyle="round")
+    old_paths_collection = LineCollection([], colors="#f4c7a1", linewidths=8, alpha=0.9)
     ax.add_collection(old_paths_collection)
     ax.set_xticks(np.arange(-0.5, cols, 1), minor=True)
     ax.set_yticks(np.arange(-0.5, rows, 1), minor=True)
@@ -275,9 +300,13 @@ def animate_trace(
     found_paths: list[list[tuple[int, int]]] = []
     for frame in frames:
         selected_running.update(frame.selected)
-        old_paths_by_frame.append([p[:] for p in found_paths])
+        # Old paths = superseded routes only, never the current best. On a solution frame,
+        # `found_paths` still holds previous solutions, then we append the new one below.
         if frame.path:
+            old_paths_by_frame.append([p[:] for p in found_paths])
             found_paths.append(frame.path[:])
+        else:
+            old_paths_by_frame.append([p[:] for p in found_paths[:-1]])
         best_path_by_frame.append(found_paths[-1][:] if found_paths else None)
         cumulative_selected_by_frame.append(set(selected_running))
 
@@ -381,8 +410,13 @@ def main() -> None:
     parser.add_argument(
         "--save",
         type=str,
-        default=None,
-        help="Optional output file (e.g. demo.gif or demo.mp4). If omitted, opens an interactive window.",
+        default="ana_theta_star_demo.gif",
+        help="Output GIF path (Pillow writer). Ignored if --show is set.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Open an interactive window instead of saving a GIF.",
     )
     args = parser.parse_args()
 
@@ -399,7 +433,8 @@ def main() -> None:
     else:
         print(f"Path found with {len(path)} waypoints over {len(frames)} animated steps.")
 
-    animate_trace(world, start, goal, frames, args.interval_ms, args.save)
+    save_path = None if args.show else args.save
+    animate_trace(world, start, goal, frames, args.interval_ms, save_path)
 
 
 if __name__ == "__main__":

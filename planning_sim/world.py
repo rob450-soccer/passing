@@ -127,6 +127,14 @@ class Node:
     def __lt__(self, other):
         return self.score < other.score
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Node):
+            return False
+        return self.location == other.location
+
+    def __hash__(self) -> int:
+        return hash(self.location)
+
     def distance_to(self, other: Node) -> float:
         """Calculate Euclidean distance between two nodes."""
         return math.hypot(self.location[0] - other.location[0], self.location[1] - other.location[1])
