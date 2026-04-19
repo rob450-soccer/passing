@@ -75,7 +75,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 _lock   = threading.Lock()
 _paths:  dict[str, dict]    = {}
 _trails: dict[str, list]    = defaultdict(list)
+_obstacles: dict[str, list[float]] = {}
 _ball:   list[float] | None = None
+_play_mode: str = ""
 
 
 def _key(team: str, player: int) -> str:
@@ -86,7 +88,7 @@ def _key(team: str, player: int) -> str:
 # UDP listener thread
 # ---------------------------------------------------------------------------
 def _udp_thread(port: int) -> None:
-    global _ball
+    global _ball, _play_mode
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", port))
@@ -100,6 +102,16 @@ def _udp_thread(port: int) -> None:
             player = int(payload["player"])
             k      = _key(team, player)
             with _lock:
+                if payload.get("event") == "obstacle_join":
+                    location = payload.get("location")
+                    if isinstance(location, list) and len(location) >= 2:
+                        _obstacles[k] = [float(location[0]), float(location[1])]
+                    continue
+
+                if payload.get("event") == "obstacle_shutdown":
+                    _obstacles.pop(k, None)
+                    continue
+
                 if payload.get("event") == "shutdown":
                     _paths.pop(k, None)
                     _trails.pop(k, None)
@@ -109,6 +121,9 @@ def _udp_thread(port: int) -> None:
 
                 if payload.get("ball"):
                     _ball = list(payload["ball"])
+                play_mode = payload.get("play_mode")
+                if isinstance(play_mode, str) and play_mode:
+                    _play_mode = play_mode
                 if payload.get("trail"):
                     hist = _trails[k]
                     hist.extend([list(pt) for pt in payload["trail"]])
@@ -146,12 +161,24 @@ class Handler(BaseHTTPRequestHandler):
                     "player":       payload.get("player", 0),
                     "plan":         payload.get("plan", []),
                     "current_step": payload.get("current_step", 0),
-                    "target":       payload.get("target"),
                     "trail":        list(_trails.get(k, [])),
                     "state":        payload.get("state", ""),
                     "is_passer":    payload.get("is_passer"),
                 })
-            state = {"agents": agents, "ball": _ball}
+            obstacles = []
+            for k, location in _obstacles.items():
+                team, player = k.rsplit(":", 1)
+                obstacles.append({
+                    "team": team,
+                    "player": int(player),
+                    "location": list(location),
+                })
+            state = {
+                "agents": agents,
+                "obstacles": obstacles,
+                "ball": _ball,
+                "play_mode": _play_mode,
+            }
 
         self._send_json(state)
 
