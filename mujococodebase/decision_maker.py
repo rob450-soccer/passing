@@ -21,6 +21,8 @@ from mujococodebase.planning.path_viz_emitter import emit as _viz_emit
 
 logger = logging.getLogger(__file__)
 
+ROBOT_RADIUS = 0.23 # meters
+
 LOG_METRICS = set(os.environ.get("LOG_METRICS", "").split(","))
 SIM_TIMESTEP = 0.02
 
@@ -39,10 +41,11 @@ class State(Enum):
     BEAMING = 0
     GETTING_UP = 1
     GO_TO_BALL = 2
-    DRIBBLE = 3
+    SCORE = 3
     NEUTRAL = 4
     GO_TO_RECEIVE_POSITION = 5
     WAIT_FOR_PASS = 6
+    PASS = 7
 
 
 class DecisionMaker:
@@ -56,6 +59,7 @@ class DecisionMaker:
         from mujococodebase.agent import Agent
         self.agent: Agent = agent
         self.is_passer: bool = True
+        self.scoring_distance: float = 3.0
 
         # Beaming and initialization
         self.beam_pose = self._get_beam_pose(random_poses=True)
@@ -71,39 +75,46 @@ class DecisionMaker:
         self.planning_cancel_events: dict[str, threading.Event] = {}
         self.paths = {
             "robot_to_ball": [],
-            "dribble": [],
+            "scoring": [],
+            "passing": [],
             "robot_to_receive": [],
         }
         self.path_ready_events = {
             "robot_to_ball": threading.Event(),
-            "dribble": threading.Event(),
+            "scoring": threading.Event(),
+            "passing": threading.Event(),
             "robot_to_receive": threading.Event(),
         }
         self.path_steps = {
             "robot_to_ball": 0,
-            "dribble": 0,
+            "scoring": 0,
+            "passing": 0,
             "robot_to_receive": 0,
         }
         self.path_follower = PathFollower(agent)
         self._follower_path_id = None  # id(self.paths[key]) last passed to path_follower.set_path
         self.ball_pos_at_last_plan: dict[str, np.ndarray] = {
             "robot_to_ball": np.zeros(2),
-            "dribble": np.zeros(2),
+            "scoring": np.zeros(2),
+            "passing": np.zeros(2),
             "robot_to_receive": np.zeros(2),
         }
         self.time_at_last_plan: dict[str, float] = {
             "robot_to_ball": 0,
-            "dribble": 0,
+            "scoring": 0,
+            "passing": 0,
             "robot_to_receive": 0,
         }
         self.replan_cooldown: dict[str, float] = {
             "robot_to_ball": 0.5,
-            "dribble": 0.3,
+            "scoring": 0.3,
+            "passing": 0.3,
             "robot_to_receive": 0.7,
         }
         self.max_no_replan: dict[str, float] = {
             "robot_to_ball": 3,
-            "dribble": 1.5,
+            "scoring": 1.5,
+            "passing": 1.5,
             "robot_to_receive": 4,
         }
 
@@ -120,7 +131,7 @@ class DecisionMaker:
         if self.agent.world.playmode is PlayModeEnum.GAME_OVER:
             return
 
-        self.is_passer = self._is_closest_to_ball()
+        self.is_passer = self._is_passer()
         self._check_global_interrupts()
         self._check_and_replan()
         #print(self._current_state)
@@ -132,14 +143,16 @@ class DecisionMaker:
                 self._state_getting_up()
             case State.GO_TO_BALL:
                 self._state_go_to_ball()
-            case State.DRIBBLE:
-                self._state_dribble()
+            case State.SCORE:
+                self._state_score()
             case State.NEUTRAL:
                 self._state_neutral()
             case State.GO_TO_RECEIVE_POSITION:
                 self._state_go_to_receive_position()
             case State.WAIT_FOR_PASS:
                 self._state_wait_for_pass()
+            case State.PASS:
+                self._state_pass()
         
         if (self.agent.world.playmode_group not in (PlayModeGroupEnum.ACTIVE_BEAM, PlayModeGroupEnum.PASSIVE_BEAM) and 
             not self.has_initialized):
@@ -182,9 +195,10 @@ class DecisionMaker:
         #    GO_TO_BALL will transition to any appropriate active play state automatically.
         if self._current_state not in (
             State.GO_TO_BALL, 
-            State.DRIBBLE, 
+            State.SCORE, 
             State.GO_TO_RECEIVE_POSITION,
             State.WAIT_FOR_PASS,
+            State.PASS,
         ) and self.has_initialized:
             self._enter_state(State.GO_TO_BALL)
     
@@ -203,7 +217,7 @@ class DecisionMaker:
                     # Force a fresh path from the robot's current pose on GO_TO_BALL entry.
                     self._create_grid_world()
                     self._plan_path("robot_to_ball", self.carry_grid_pos, self.carry_world_pos)
-            case State.DRIBBLE:
+            case State.SCORE:
                 # self._replan()
                 self._check_and_replan()
                 pass
@@ -214,6 +228,8 @@ class DecisionMaker:
                 self._check_and_replan()
                 pass
             case State.WAIT_FOR_PASS:
+                pass  # No entry actions yet.
+            case State.PASS:
                 pass  # No entry actions yet.
 
         self._current_state = new_state
@@ -253,7 +269,8 @@ class DecisionMaker:
     def _state_go_to_ball(self):
         """
         Follow the planned path to the position behind the ball, facing the ball-to-goal direction when close.
-        Transitions to DRIBBLE if path is completed.
+        Transitions to SCORE if path is completed and inside scoring distance.
+        Transitions to PASS if path is completed and outside scoring distance.
         Transitions to GO_TO_RECEIVE_POSITION if not self.is_passer.
         """
         if not self.is_passer:
@@ -271,21 +288,33 @@ class DecisionMaker:
         carry_pos = self.carry_world_pos if hasattr(self, "carry_world_pos") else ball_pos
         orientation = desired_orientation if np.linalg.norm(my_pos - carry_pos) <= 2.0 else None
 
-        self._follow_path("robot_to_ball", next_state=State.DRIBBLE, target_orientation=orientation)
+        if self._should_score():
+            self._follow_path("robot_to_ball", next_state=State.SCORE, target_orientation=orientation)
+        else:
+            self._follow_path("robot_to_ball", next_state=State.PASS, target_orientation=orientation)
 
-    def _state_dribble(self):
+    def _state_score(self):
         """
-        Follow the planned dribble path through the ball toward the goal.
+        Follow the planned scoring path through the ball toward the goal.
         Falls back to GO_TO_BALL when the path is exhausted.
         Transitions to GO_TO_BALL when the path is complete.
         Transitions to GO_TO_BALL when the robot is out of range of the ball.
         
         """
+        EXPECTED_BALL_ERROR = 0.1  # meters
+
+        planned_ball_pos = self.ball_pos_at_last_plan["scoring"]
+        current_ball_pos = self.agent.world.ball_pos[:2]
+
+        if np.linalg.norm(current_ball_pos - planned_ball_pos) > EXPECTED_BALL_ERROR:
+            self._enter_state(State.GO_TO_BALL)
+            return
+
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
 
-        DRIBBLE_ABANDON_THRESHOLD = 1.0  # meters
-        if np.linalg.norm(my_pos - ball_pos) > DRIBBLE_ABANDON_THRESHOLD:
+        SCORING_ABANDON_THRESHOLD = 1.0  # meters
+        if np.linalg.norm(my_pos - ball_pos) > SCORING_ABANDON_THRESHOLD:
             self._enter_state(State.GO_TO_BALL)
             return
 
@@ -294,7 +323,39 @@ class DecisionMaker:
         ball_to_goal_norm = np.linalg.norm(ball_to_goal)
         desired_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else None
 
-        self._follow_path("dribble", next_state=State.GO_TO_BALL, target_orientation=desired_orientation)
+        self._follow_path("scoring", next_state=State.GO_TO_BALL, target_orientation=desired_orientation)
+    
+    def _state_pass(self):
+        """
+        Follow the planned passing path through the ball toward the receive position.
+        Falls back to GO_TO_BALL when the path is exhausted.
+        Transitions to GO_TO_BALL when the path is complete.
+        Transitions to GO_TO_BALL when the robot is out of range of the ball.
+        
+        """
+        EXPECTED_BALL_ERROR = 0.1
+
+        planned_ball_pos = self.ball_pos_at_last_plan["passing"]
+        current_ball_pos = self.agent.world.ball_pos[:2]
+
+        if np.linalg.norm(current_ball_pos - planned_ball_pos) > EXPECTED_BALL_ERROR:
+            self._enter_state(State.GO_TO_BALL)
+            return
+
+        my_pos = self.agent.world.global_position[:2]
+        ball_pos = self.agent.world.ball_pos[:2]
+
+        PASSING_ABANDON_THRESHOLD = 1.0  # meters
+        if np.linalg.norm(my_pos - ball_pos) > PASSING_ABANDON_THRESHOLD:
+            self._enter_state(State.GO_TO_BALL)
+            return
+
+        receive_pos = self.receive_world_pos
+        ball_to_receive_pos = receive_pos - ball_pos
+        ball_to_receive_pos_norm = np.linalg.norm(ball_to_receive_pos)
+        desired_orientation = MathOps.vector_angle(ball_to_receive_pos) if ball_to_receive_pos_norm > 0 else None
+
+        self._follow_path("passing", next_state=State.GO_TO_BALL, target_orientation=desired_orientation)
 
     def _state_go_to_receive_position(self):
         """
@@ -363,7 +424,8 @@ class DecisionMaker:
         current_time = time.time()
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
-        currently_kicking = self._is_ball_in_kicking_motion(self.agent.world.ball_velocity)
+        ball_vel = self.agent.world.ball_velocity[:2]
+        currently_kicking = self._is_ball_in_kicking_motion(ball_vel)
 
         MUST_REPLAN_THRESHOLD = 6 # proportional to the replan_cooldown
 
@@ -374,26 +436,40 @@ class DecisionMaker:
             and current_time - self.time_at_last_plan["robot_to_ball"] > self.replan_cooldown["robot_to_ball"]
             and (
                 # check if ball has moved enough since last plan, unless it just got kicked
-                not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_ball"]) >= 0.2
+                not currently_kicking and np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["robot_to_ball"]) >= 0.1
                 # check if it's been too long since last plan
                 or current_time - self.time_at_last_plan["robot_to_ball"] > self.max_no_replan["robot_to_ball"]
             )
         ):
             self._plan_path("robot_to_ball", self.carry_grid_pos, self.carry_world_pos)
 
-        # dribble
+        # scoring
         elif (
-            self._current_state == State.DRIBBLE
+            self._current_state == State.SCORE
             # make sure it's not too soon to replan
-            and current_time - self.time_at_last_plan["dribble"] > self.replan_cooldown["dribble"]
+            and current_time - self.time_at_last_plan["scoring"] > self.replan_cooldown["scoring"]
             and (
                 # check if the robot is getting close to the ball and about to kick it
-                np.linalg.norm(my_pos - self.dribble_world_pos) <= 0.2
+                np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["scoring"]) >= 0.1
                 # check if it's been too long since last plan
-                or current_time - self.time_at_last_plan["dribble"] > self.max_no_replan["dribble"]
+                or current_time - self.time_at_last_plan["scoring"] > self.max_no_replan["scoring"]
             )
         ):
-            self._plan_path("dribble", self.dribble_grid_pos, self.dribble_world_pos)
+            self._plan_path("scoring", self.scoring_grid_pos, self.scoring_world_pos)
+        
+        # passing
+        elif (
+            self._current_state == State.PASS
+            # make sure it's not too soon to replan
+            and current_time - self.time_at_last_plan["passing"] > self.replan_cooldown["passing"]
+            and (
+                # check if the robot is getting close to the ball and about to kick it
+                np.linalg.norm(ball_pos - self.ball_pos_at_last_plan["passing"]) >= 0.1
+                # check if it's been too long since last plan
+                or current_time - self.time_at_last_plan["passing"] > self.max_no_replan["passing"]
+            )
+        ):
+            self._plan_path("passing", self.passing_grid_pos, self.passing_world_pos)
 
         # robot_to_receive
         elif (
@@ -418,8 +494,9 @@ class DecisionMaker:
         """
         path_key_by_state = {
             State.GO_TO_BALL: "robot_to_ball",
-            State.DRIBBLE: "dribble",
+            State.SCORE: "scoring",
             State.GO_TO_RECEIVE_POSITION: "robot_to_receive",
+            State.PASS: "passing",
         }
 
         path_key = path_key_by_state.get(self._current_state)
@@ -440,6 +517,7 @@ class DecisionMaker:
             current_step=current_step,
             current_pos=agent_world_pos,
             state=self._current_state.name,
+            play_mode=self.agent.world.playmode.name,
             target_pos=getattr(self, "_viz_goal_world", None),
             ball_pos=ball_pos,
             is_passer=self.is_passer,
@@ -525,8 +603,9 @@ class DecisionMaker:
         self._create_grid_world()
         for path_key, grid_target, world_target in (
             ("robot_to_ball", self.carry_grid_pos, self.carry_world_pos),
-            ("dribble", self.dribble_grid_pos, self.dribble_world_pos),
+            ("scoring", self.scoring_grid_pos, self.scoring_world_pos),
             ("robot_to_receive", self.receive_grid_pos, self.receive_world_pos),
+            ("passing", self.passing_grid_pos, self.passing_world_pos),
         ):
             self._plan_path(path_key, grid_target, world_target)
         self.has_initialized = True
@@ -632,7 +711,7 @@ class DecisionMaker:
         for robot in obstacles:
             pos = robot.position
             # logger.debug(f"Obstacle at {pos}")
-            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), inflation_amount=6)
+            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), obstacle_radius=ROBOT_RADIUS, inflation_amount=6)
 
         # convert location of line in front of the goal to grid coordinates
         goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
@@ -670,8 +749,8 @@ class DecisionMaker:
         # cache the goal world pos for the viz target marker
         self._viz_goal_world = list(goal_world_pos)
 
-        # Carry position: 0.30 m *behind* the ball along the ball-to-goal line.
-        self.carry_world_pos = ball_world_pos - ball_to_goal_dir * 0.30
+        # Carry position: 0.20 m *behind* the ball along the ball-to-goal line.
+        self.carry_world_pos = ball_world_pos - ball_to_goal_dir * 0.20
         carry_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
         self.carry_grid_pos = np.array([
             round(self.carry_world_pos[0] * self.grid_scale),
@@ -679,13 +758,13 @@ class DecisionMaker:
             MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(carry_orientation) / 45.0))
         ])
 
-        # Dribble target: 0.30 m *in front of* the ball along the ball-to-goal line.
-        self.dribble_world_pos = ball_world_pos + ball_to_goal_dir * 0.30
-        dribble_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
-        self.dribble_grid_pos = np.array([
-            round(self.dribble_world_pos[0] * self.grid_scale),
-            round(self.dribble_world_pos[1] * self.grid_scale),
-            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(dribble_orientation) / 45.0))
+        # Scoring target: 0.20 m *in front of* the ball along the ball-to-goal line.
+        self.scoring_world_pos = ball_world_pos + ball_to_goal_dir * 0.20
+        scoring_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else 0.0
+        self.scoring_grid_pos = np.array([
+            round(self.scoring_world_pos[0] * self.grid_scale),
+            round(self.scoring_world_pos[1] * self.grid_scale),
+            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(scoring_orientation) / 45.0))
         ])
 
         # Receive position: min of 4 meters from ball to goal along ball-to-goal line,
@@ -698,20 +777,42 @@ class DecisionMaker:
             round(self.receive_world_pos[1] * self.grid_scale),
             MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(receive_orientation) / 45.0))
         ])
+
+        # Passing target: 0.20 m *in front of* the ball along the ball-to-receive line.
+        ball_to_receive = self.receive_world_pos - ball_world_pos
+        ball_to_receive_norm = np.linalg.norm(ball_to_receive)
+        self.passing_world_pos = ball_world_pos + ball_to_receive * 0.20
+        passing_orientation = MathOps.vector_angle(ball_to_receive) if ball_to_receive_norm > 0 else 0.0
+        self.passing_grid_pos = np.array([
+            round(self.passing_world_pos[0] * self.grid_scale),
+            round(self.passing_world_pos[1] * self.grid_scale),
+            MathOps.normalize_deg(45.0 * round(MathOps.normalize_deg(passing_orientation) / 45.0))
+        ])
     
-    def _is_closest_to_ball(self) -> bool:
+    def _should_score(self) -> bool:
         """
-        Returns True if this agent is closer to the ball than all teammates.
+        Returns True if the ball it withint a distance from the goal.
+        """
+        ball_pos = self.agent.world.ball_pos[:2]
+        goal_pos = self.agent.world.field.get_their_goal_position()[:2]
+        ball_to_goal = ball_pos - goal_pos
+        return np.linalg.norm(ball_to_goal) < self.scoring_distance
+    
+    def _is_passer(self) -> bool:
+        """
+        Returns True if this agent is closer to a considered pos than all teammates.
+        Considered position is carry_world_pos if it exists. Otherwise, is ball_pos.
 
         Visibility is determined by last_seen_time being set on the OtherRobot object.
         If no teammates are visible, returns True, since it is assumed it is the only player.
 
         Returns:
-            bool: True if this agent is the closest to the ball, False otherwise.
+            bool: True if this agent is the closest to the considered pos. False otherwise.
         """
         ball_pos = self.agent.world.ball_pos[:2]
+        considered_pos = self.carry_world_pos if hasattr(self, "carry_world_pos") else ball_pos
         my_pos = self.agent.world.global_position[:2]
-        my_dist = np.linalg.norm(my_pos - ball_pos)
+        my_dist = np.linalg.norm(my_pos - considered_pos)
 
         teammates = [
             player for player in self.agent.world.our_team_players
@@ -724,8 +825,16 @@ class DecisionMaker:
                 logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
             return bool(self.is_passer)  # hold current role if no teammate data yet
 
-        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - ball_pos) for p in teammates)
-        return bool(my_dist <= closest_teammate_dist)
+        closest_teammate_dist = min(np.linalg.norm(p.position[:2] - considered_pos) for p in teammates)
+        
+        EPS = 1e-3
+        if my_dist < closest_teammate_dist - EPS:
+            return True
+        elif my_dist > closest_teammate_dist + EPS:
+            return False
+        else:
+            # deterministic tie-breaker
+            return self.agent.world.number == 1
 
     def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
         """
