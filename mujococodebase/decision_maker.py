@@ -1,10 +1,13 @@
 import json
 import logging
+import math
 import os
 import threading
 import random
 import time
+import xml.etree.ElementTree as ET
 from enum import Enum
+from pathlib import Path
 
 import numpy as np
 from mujococodebase.utils.math_ops import MathOps
@@ -20,6 +23,16 @@ logger = logging.getLogger(__file__)
 
 LOG_METRICS = set(os.environ.get("LOG_METRICS", "").split(","))
 SIM_TIMESTEP = 0.02
+
+# Match passing/verification/evaluators.py (tests 5B/5C, 6B/6C).
+MAX_KICK_TORQUE_NM = 100.0
+JOINT_LIMIT_MARGIN_DEG = 1.0
+
+# Env keys that enable logging of PD torques implied by the last motor command
+# (same law as rcssservermj DefaultActionParser + Simulation.ctrl_motor).
+_LOG_COMMANDED_PD_TORQUE_KEYS = frozenset({"joint_commanded_pd_torques", "joint_torques"})
+
+_joint_limits_cache: dict[str, tuple[float, float]] | None = None
 
 
 class State(Enum):
@@ -94,6 +107,11 @@ class DecisionMaker:
             "robot_to_receive": 4,
         }
 
+        self._ball_kick_speed_streak = 0
+
+        # testing
+        self.has_kicked = False
+
     # --------------------------------------------------
     # Core Loop
     # --------------------------------------------------
@@ -129,6 +147,7 @@ class DecisionMaker:
 
         self._emit_viz_tick()
         self.agent.robot.commit_motor_targets_pd()
+        self._log_trial_info()
 
     # --------------------------------------------------
     # State Transitions
@@ -344,7 +363,7 @@ class DecisionMaker:
         current_time = time.time()
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
-        currently_kicking = self._is_ball_in_kicking_motion(ball_pos)
+        currently_kicking = self._is_ball_in_kicking_motion(self.agent.world.ball_velocity)
 
         MUST_REPLAN_THRESHOLD = 6 # proportional to the replan_cooldown
 
@@ -425,54 +444,76 @@ class DecisionMaker:
             ball_pos=ball_pos,
             is_passer=self.is_passer,
         )
+    
+    def _log_trial_info(self) -> None:
+        if not LOG_METRICS:
+            return
 
-        def _log_trial_info(self) -> None:
-            # ── per-timestep metrics ───────────────────────────────────────────
-            if any(m in LOG_METRICS for m in ("velocity", "com_z_vel", "com_x_vel")):
-                now = time.time()
-                pos = self.agent.world.global_position.copy()
-                if self._last_position is not None:
-                    vel_vec = (pos - self._last_position) / SIM_TIMESTEP
-                    if "velocity" in LOG_METRICS:
-                        print(f"[metric] velocity: {np.linalg.norm(vel_vec[:2]):.4f}", flush=True)
-                    if "com_z_vel" in LOG_METRICS:
-                        print(f"[metric] com_z_vel: {vel_vec[2]:.4f}", flush=True)
-                    if "com_x_vel" in LOG_METRICS:
-                        print(f"[metric] com_x_vel: {vel_vec[0]:.4f}", flush=True)
-                self._last_position = pos
+        # ── per-timestep metrics ───────────────────────────────────────────
+        if any(m in LOG_METRICS for m in ("velocity", "com_z_vel", "com_x_vel")):
+            now = time.time()
+            pos = self.agent.world.global_position.copy()
+            if self._last_position is not None:
+                vel_vec = (pos - self._last_position) / SIM_TIMESTEP
+                if "velocity" in LOG_METRICS:
+                    print(f"[metric] velocity: {np.linalg.norm(vel_vec[:2]):.4f}")
+                if "com_z_vel" in LOG_METRICS:
+                    print(f"[metric] com_z_vel: {vel_vec[2]:.4f}")
+                if "com_x_vel" in LOG_METRICS:
+                    print(f"[metric] com_x_vel: {vel_vec[0]:.4f}")
+            self._last_position = pos
 
-            if "com_height" in LOG_METRICS:
-                print(f"[metric] com_height: {self.agent.world.global_position[2]:.4f}", flush=True)
+        if "com_height" in LOG_METRICS:
+            print(f"[metric] com_height: {self.agent.world.global_position[2]:.4f}")
 
-            # if "com_z_vel" in LOG_METRICS:
-            #     print(f"[metric] com_z_vel: {self.agent.world.global_linvel[2]:.4f}", flush=True)
+        # if "com_z_vel" in LOG_METRICS:
+        #     print(f"[metric] com_z_vel: {self.agent.world.global_linvel[2]:.4f}")
 
-            # if "com_x_vel" in LOG_METRICS:
-            #     print(f"[metric] com_x_vel: {self.agent.world.global_linvel[0]:.4f}", flush=True)
+        # if "com_x_vel" in LOG_METRICS:
+        #     print(f"[metric] com_x_vel: {self.agent.world.global_linvel[0]:.4f}")
 
-            if "latency_ms" in LOG_METRICS:
-                _t0 = time.perf_counter()
-            # ── end metrics setup ──────────────────────────────────────────────
+        if "latency_ms" in LOG_METRICS:
+            _t0 = time.perf_counter()
+        # ── end metrics setup ──────────────────────────────────────────────
 
-            # reached_ball — stop trigger for Run E
-            if "velocity" in LOG_METRICS:
-                print(self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0)
-                if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0:
-                    print("[metric] reached_ball", flush=True)
+        # reached_ball — stop trigger for Run E
+        if "velocity" in LOG_METRICS:
+            print(self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0)
+            if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0:
+                print("[metric] reached_ball")
 
-            # ── post-update metrics ────────────────────────────────────────────
-            if "latency_ms" in LOG_METRICS:
-                elapsed_ms = (time.perf_counter() - _t0) * 1000
-                print(f"[metric] latency_ms: {elapsed_ms:.3f}", flush=True)
+        # ── post-update metrics ────────────────────────────────────────────
+        if "latency_ms" in LOG_METRICS:
+            elapsed_ms = (time.perf_counter() - _t0) * 1000
+            print(f"[metric] latency_ms: {elapsed_ms:.3f}")
 
-            if "joint_torques" in LOG_METRICS:
-                torques = self.agent.robot.get_joint_torques()
-                print(f"[metric] joint_torques: {json.dumps(torques)}", flush=True)
+        if LOG_METRICS & _LOG_COMMANDED_PD_TORQUE_KEYS:
+            torques = _commanded_pd_torques_nm(self.agent.robot)
+            bad_torques = {k: v for k, v in torques.items() if abs(v) > MAX_KICK_TORQUE_NM}
+            if bad_torques:
+                print(f"[metric] joint_torques: {json.dumps(bad_torques)}")
 
-            if "joint_angles" in LOG_METRICS:
-                angles = self.agent.robot.get_joint_angles()
-                print(f"[metric] joint_angles: {json.dumps(angles)}", flush=True)
-            # ── end post-update metrics ────────────────────────────────────────
+        if "joint_angles" in LOG_METRICS:
+            angles = self.agent.robot.motor_positions
+            limits = _hinge_joint_limits()
+            bad_angles = {}
+            for joint, angle in angles.items():
+                lo, hi = limits.get(joint, (-180.0, 180.0))
+                if not (lo - JOINT_LIMIT_MARGIN_DEG <= angle <= hi + JOINT_LIMIT_MARGIN_DEG):
+                    bad_angles[joint] = angle
+            if bad_angles:
+                print(f"[metric] joint_angles: {json.dumps(bad_angles)}")
+        # ── end post-update metrics ────────────────────────────────────────
+
+        if "ball_stopped" in LOG_METRICS:
+            if not self.has_kicked:
+                if self._is_ball_in_kicking_motion(self.agent.world.ball_velocity):
+                    self.has_kicked = True
+                    print("HAS KICKED")
+            else:
+                print(f"BALL VELOCITY: {np.linalg.norm(self.agent.world.ball_velocity)}")
+            if self.has_kicked and np.linalg.norm(self.agent.world.ball_velocity) <= 0.01:
+                print("[test 5,6] ball kicked then stopped")
 
 
     # --------------------------------------------------
@@ -688,9 +729,14 @@ class DecisionMaker:
 
     def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
         """
-        Returns True if the ball was kicked and is now in motion.
+        True only after ‖ball_velocity‖ stays above 0.5 m/s for 5 consecutive updates.
+        Any update at or below 0.5 m/s resets the streak.
         """
-        return np.linalg.norm(ball_velocity) > 0.5 # 0.5 m/s threshold
+        if np.linalg.norm(ball_velocity) > 0.5:
+            self._ball_kick_speed_streak += 1
+        else:
+            self._ball_kick_speed_streak = 0
+        return self._ball_kick_speed_streak >= 3
 
     def _get_beam_pose(self, random_poses: bool):
         """
@@ -741,3 +787,68 @@ class DecisionMaker:
         else:
             logger.warning("Agent has no default pose defined; falling back to origin.")
             return (0.0, 0.0, 0.0)
+
+
+# --------------------------------------------------
+# Testing Helpers
+# --------------------------------------------------
+
+def _commanded_pd_torques_nm(robot) -> dict[str, float]:
+    """
+    Commanded actuator torque (Nm) from the PD rule used by the simulator:
+
+        tau = kp * (q_cmd - q) + kd * (dq_cmd - dq) + tau_ff
+
+    Perception and motor effector messages use joint angle/velocity in degrees;
+    the server converts q, dq to radians before applying gains.
+    """
+    torques: dict[str, float] = {}
+    for name in robot.ROBOT_MOTORS:
+        t = robot.motor_targets[name]
+        q_cmd = math.radians(t["target_position"])
+        dq_cmd = 0.0
+        tau_ff = 0.0
+        q_deg = robot.motor_positions.get(name, 0.0)
+        dq_deg = robot.motor_speeds.get(name, 0.0)
+        q = math.radians(q_deg)
+        dq = math.radians(dq_deg)
+        kp, kd = t["kp"], t["kd"]
+        torques[name] = kp * (q_cmd - q) + kd * (dq_cmd - dq) + tau_ff
+    return torques
+
+def _load_joint_limits_from_robot_xml() -> dict[str, tuple[float, float]]:
+    """Hinge joint (deg) limits from the ant robot model — same source as verification/conftest.py."""
+    base = Path(__file__).resolve().parent
+    candidates = [
+        base.parent.parent / "rcssservermj" / "src" / "rcsssmj" / "resources" / "robots" / "ant" / "robot.xml",
+        base.parent.parent / "RCSSServerMJ" / "src" / "rcsssmj" / "resources" / "robots" / "ant" / "robot.xml",
+    ]
+    robot_xml_path = next((p for p in candidates if p.is_file()), None)
+    if robot_xml_path is None:
+        raise FileNotFoundError(
+            "Could not locate ant robot.xml for joint limit checks. Tried: "
+            + ", ".join(str(p) for p in candidates)
+        )
+
+    root = ET.parse(robot_xml_path).getroot()
+    limits: dict[str, tuple[float, float]] = {}
+    for joint in root.findall(".//joint[@type='hinge'][@range]"):
+        name = joint.attrib.get("name")
+        range_str = joint.attrib.get("range", "")
+        if not name:
+            continue
+        parts = range_str.split()
+        if len(parts) != 2:
+            continue
+        lo, hi = float(parts[0]), float(parts[1])
+        limits[name] = (lo, hi)
+
+    if not limits:
+        raise ValueError(f"No hinge joint limits found in {robot_xml_path}")
+    return limits
+
+def _hinge_joint_limits() -> dict[str, tuple[float, float]]:
+    global _joint_limits_cache
+    if _joint_limits_cache is None:
+        _joint_limits_cache = _load_joint_limits_from_robot_xml()
+    return _joint_limits_cache

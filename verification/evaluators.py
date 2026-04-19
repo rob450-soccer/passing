@@ -108,21 +108,30 @@ def check_kick_accuracy(trial: TrialData, error_threshold: float) -> tuple[bool,
     return True, ""
 
 def check_kick_torque(trial: TrialData) -> tuple[bool, str]:
-    """Tests 5B/6B (torque)."""
-    if trial.joint_torques:
-        max_t = max(abs(v) for step in trial.joint_torques for v in step.values())
-        if max_t > MAX_TORQUE:
-            return False, f"torque {max_t:.1f} Nm > {MAX_TORQUE} Nm"
-    return True, ""
+    """Tests 5B/6B (torque).
+
+    The player logs only timesteps where some commanded PD torque exceeds
+    ``MAX_TORQUE`` (see ``decision_maker._log_trial_info``). Empty
+    ``joint_torques`` means no violation was recorded.
+    """
+    if not trial.joint_torques:
+        return True, ""
+    max_t = max(abs(v) for step in trial.joint_torques for v in step.values())
+    return False, f"torque {max_t:.1f} Nm > {MAX_TORQUE} Nm"
 
 def check_kick_joint_limits(trial: TrialData, joint_limits: dict) -> tuple[bool, str]:
-    """Tests 5C/6C (joint limits)."""
+    """Tests 5C/6C (joint limits).
+
+    The player logs only timesteps where at least one joint angle is outside
+    limits (with margin); each record is a dict of violating joints at that step.
+    """
+    if not trial.joint_angles:
+        return True, ""
     for step in trial.joint_angles:
         for joint, angle in step.items():
             lo, hi = joint_limits.get(joint, (-180.0, 180.0))
             if not (lo - JOINT_MARGIN <= angle <= hi + JOINT_MARGIN):
                 return False, f"joint {joint} angle {angle:.1f}° out of limits ({lo:.1f}°, {hi:.1f}°)"
-    return True, ""
 
 
 # ── Test 8 ────────────────────────────────────────────────────────────────────

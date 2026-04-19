@@ -37,7 +37,7 @@ RUN_CONFIG = {
         "log_metrics":  ["solo"],
     },
     "B": { # test 5
-        "stop_trigger": "ball_stopped:",
+        "stop_trigger": "ball kicked then stopped",
         "timeout":       90,
         "n_players":     2,
         "reset_ball":    False,
@@ -49,7 +49,7 @@ RUN_CONFIG = {
         ],
     },
     "C": { #test 6
-        "stop_trigger": "ball_stopped:",
+        "stop_trigger": "ball kicked then stopped",
         "timeout":       90,
         "n_players":     1,
         "reset_ball":    False,
@@ -142,8 +142,8 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
     try:
         # Start server
         server, _ = utils.popen_with_logged_output(
-            ["hatch", "run", "rcssservermj", "--no-render"],
-            # ["hatch", "run", "rcssservermj"],
+            # ["hatch", "run", "rcssservermj", "--no-render"],
+            ["hatch", "run", "rcssservermj"],
             cwd=DIRS["server"], logger=logger, label="server", start_new_session=True,
             env={
                 **os.environ,
@@ -241,8 +241,8 @@ def _parse_line(line: str, data: TrialData):
       [metric] com_height: 0.91
       [metric] com_z_vel: -0.02
       [metric] com_x_vel: 0.15
-      [metric] joint_angles: {"hip_l": 12.3, "knee_l": -5.1, ...}
-      [metric] joint_torques: {"hip_l": 45.2, "knee_l": 38.7, ...}
+      [metric] joint_angles: {...}  # only joints outside XML limits (with margin), that timestep
+      [metric] joint_torques: {...}  # only joints with |commanded PD torque| > cap, that timestep
       [metric] latency_ms: 4.7
       [metric] collision at: 12.34
       [metric] out_of_bounds
