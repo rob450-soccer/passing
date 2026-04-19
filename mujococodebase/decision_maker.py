@@ -17,6 +17,8 @@ from mujococodebase.planning.path_viz_emitter import emit as _viz_emit
 
 logger = logging.getLogger(__file__)
 
+ROBOT_RADIUS = 0.23 # meters
+
 
 class State(Enum):
     BEAMING = 0
@@ -536,7 +538,7 @@ class DecisionMaker:
         for robot in obstacles:
             pos = robot.position
             logger.debug(f"Obstacle at {pos}")
-            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), inflation_amount=6)
+            self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), obstacle_radius=ROBOT_RADIUS, inflation_amount=6)
 
         # convert location of line in front of the goal to grid coordinates
         goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
