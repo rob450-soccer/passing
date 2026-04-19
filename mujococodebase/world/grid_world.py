@@ -123,6 +123,11 @@ class GridWorld:
     def add_obstacle(self, position: np.ndarray[int], obstacle_radius: int = None, inflation_amount: int = 2) -> None:
         """Add an obstacle and inflate the area around it."""
         pos = self._cartesian_to_array_index(position)
+
+        if not (0 <= pos[0] < self._grid.shape[0] and 0 <= pos[1] < self._grid.shape[1]):
+            return
+        self._grid[pos[0], pos[1]] = 1
+
         if obstacle_radius is not None:
             obstacle_radius = 1
         
