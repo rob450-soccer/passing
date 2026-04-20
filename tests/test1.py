@@ -114,7 +114,11 @@ def run_test():
                 player_id = 1
                 obstacle_id = 1
 
-                paths_read = [False, False, False]
+                paths_read = {
+                    "robot_to_ball": False,
+                    "dribble": False,
+                    "robot_to_receive": False,
+                }
                 paths = []
 
                 try:
@@ -219,11 +223,10 @@ def run_test():
                             if p_player.poll() is not None:
                                 break
                             continue
-
-                        if paths_read[0]:# and paths_read[1] and paths_read[2]:
-                            read_all_paths = True
-                            break
                         
+                        if all(paths_read.values()):
+                            break
+
                         # Log the run_player output to both the console and the log file
                         # We strip the newline character because the logger adds its own
                         line = line.rstrip('\n')
@@ -239,17 +242,15 @@ def run_test():
                         # Capture the paths
                         if "robot_to_ball path:" in line:
                             paths.append(parse_path_from_log(line))
-                            read_all_paths = True
-                            paths_read[0] = True
-                            break
+                            paths_read["robot_to_ball"] = True
 
-                        if "robot_to_goal path:" in line:
+                        if "dribble path:" in line:
                             paths.append(parse_path_from_log(line))
-                            paths_read[1] = True
-                        
-                        if "ball_to_goal path:" in line:
+                            paths_read["dribble"] = True
+
+                        if "robot_to_receive path:" in line:
                             paths.append(parse_path_from_log(line))
-                            paths_read[2] = True
+                            paths_read["robot_to_receive"] = True
                             
                         # Timeout guard
                         if time.time() - start_time > TIMEOUT_SECONDS:
@@ -257,8 +258,7 @@ def run_test():
                             break
 
                     # Evaluate Trial
-                    if read_all_paths:
-                        # if not any([path is None for path in paths]):
+                    if all(paths_read.values()):
                         if len(paths) < 1:
                             logger.error(utils.color(f"[FAIL] Trial {trial_count}: Paths were not logged.", "red"))
                         elif grid_scale is None:
@@ -271,11 +271,11 @@ def run_test():
                                     for gx, gy in path
                                 ]
                                 if check_intersection(path_in_meters, obs_config):
-                                    logger.error(utils.color(f"[FAIL] Trial {trial_count}: Path intersected with an obstacle.", "red"))
+                                    logger.error(utils.color(f"[FAIL] Trial {trial_count}: A path intersected with an obstacle.", "red"))
                                     passed = False
                             if passed:
                                 passed_trials += 1
-                                logger.info(utils.color(f"[PASS] Trial {trial_count}: Safe path planned.", "green"))
+                                logger.info(utils.color(f"[PASS] Trial {trial_count}: Safe paths planned.", "green"))
                     elif p_player.poll() is not None:
                         logger.error(utils.color(f"[FAIL] Trial {trial_count}: Player process crashed.", "red"))
 

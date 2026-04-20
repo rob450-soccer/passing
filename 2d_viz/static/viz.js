@@ -124,21 +124,6 @@ function drawAgents(list) {
       ctx.stroke();
     }
 
-    // Target crosshair
-    if (ag.target) {
-      const tx = wx(ag.target[0]), ty = wy(ag.target[1]);
-      const r  = Math.max(4, wl(0.15));
-      ctx.strokeStyle = "#ffe020";
-      ctx.lineWidth   = 2;
-      ctx.beginPath();
-      ctx.arc(tx, ty, r, 0, 2 * Math.PI);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(tx - r - 4, ty); ctx.lineTo(tx + r + 4, ty);
-      ctx.moveTo(tx, ty - r - 4); ctx.lineTo(tx, ty + r + 4);
-      ctx.stroke();
-    }
-
     // Agent dot — outer ring = team colour, inner fill = FSM state colour
     const lp = ag.trail.length ? ag.trail[ag.trail.length - 1] : ag.plan[0];
     if (lp) {
@@ -181,6 +166,32 @@ function drawAgents(list) {
 }
 
 // ---------------------------------------------------------------------------
+// Drawing: obstacles
+// ---------------------------------------------------------------------------
+function drawObstacles(list) {
+  if (!Array.isArray(list)) return;
+  for (const ob of list) {
+    if (!ob.location || ob.location.length < 2) continue;
+    const ox = wx(ob.location[0]);
+    const oy = wy(ob.location[1]);
+    const r = Math.max(4, wl(0.14));
+
+    ctx.beginPath();
+    ctx.arc(ox, oy, r + 2, 0, 2 * Math.PI);
+    ctx.fillStyle = "#222";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(ox, oy, r, 0, 2 * Math.PI);
+    ctx.fillStyle = "#e74c3c";
+    ctx.fill();
+    ctx.strokeStyle = "#000a";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Drawing: ball
 // ---------------------------------------------------------------------------
 function drawBall(b) {
@@ -199,6 +210,7 @@ function drawBall(b) {
 // Poll loop
 // ---------------------------------------------------------------------------
 const statusEl = document.getElementById("status");
+const playModeEl = document.getElementById("playmode");
 let connected = false;
 
 async function poll() {
@@ -206,16 +218,20 @@ async function poll() {
     const r = await fetch("/state");
     if (!r.ok) throw new Error("bad response");
     const d = await r.json();
+    const pm = d.play_mode ? String(d.play_mode).replace(/_/g, " ") : "unknown";
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     drawField();
+    drawObstacles(d.obstacles);
     drawAgents(d.agents);
     drawBall(d.ball);
 
+    playModeEl.textContent = `Play Mode: ${pm}`;
     statusEl.textContent = `${d.agents.length} agent(s) — ${new Date().toLocaleTimeString()}`;
     connected = true;
   } catch (e) {
     if (connected) {
+      playModeEl.textContent = "Play Mode: disconnected";
       statusEl.textContent = "connection lost — retrying…";
       connected = false;
     }
