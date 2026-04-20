@@ -619,8 +619,7 @@ class DecisionMaker:
 
         # convert location of line in front of the goal to grid coordinates
         goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
-        goal_width = abs(self.agent.world.field.field_landmarks.landmarks["g_lup"][1] 
-                         - self.agent.world.field.field_landmarks.landmarks["g_llp"][1])
+        goal_width = self.agent.world.field.get_goal_width()
         offsets = np.array(range(
             round((goal_world_pos[1] - goal_width/2) * self.grid_scale), 
             round((goal_world_pos[1] + goal_width/2) * self.grid_scale)

@@ -22,6 +22,10 @@ class Field(ABC):
     @abstractmethod
     def get_length(self):
         raise NotImplementedError()
+
+    @abstractmethod
+    def get_goal_width(self):
+        raise NotImplementedError()
     
 
 class FIFAField(Field):
@@ -35,6 +39,10 @@ class FIFAField(Field):
     @override
     def get_length(self):
         return 105
+
+    @override
+    def get_goal_width(self):
+        return 7.32
     
 
 class HLAdultField(Field):
@@ -48,3 +56,7 @@ class HLAdultField(Field):
     @override
     def get_length(self):
         return 14
+
+    @override
+    def get_goal_width(self):
+        return 2.6
