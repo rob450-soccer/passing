@@ -20,6 +20,7 @@ logger = logging.getLogger(__file__)
 
 LOG_METRICS = set(os.environ.get("LOG_METRICS", "").split(","))
 SIM_TIMESTEP = 0.02
+SIM_TIME = 0
 
 
 class State(Enum):
@@ -128,6 +129,7 @@ class DecisionMaker:
             self._initialize()
 
         self._emit_viz_tick()
+        self._log_trial_info()
         self.agent.robot.commit_motor_targets_pd()
 
     # --------------------------------------------------
@@ -426,53 +428,58 @@ class DecisionMaker:
             is_passer=self.is_passer,
         )
 
-        def _log_trial_info(self) -> None:
-            # ── per-timestep metrics ───────────────────────────────────────────
-            if any(m in LOG_METRICS for m in ("velocity", "com_z_vel", "com_x_vel")):
-                now = time.time()
-                pos = self.agent.world.global_position.copy()
-                if self._last_position is not None:
-                    vel_vec = (pos - self._last_position) / SIM_TIMESTEP
-                    if "velocity" in LOG_METRICS:
-                        print(f"[metric] velocity: {np.linalg.norm(vel_vec[:2]):.4f}", flush=True)
-                    if "com_z_vel" in LOG_METRICS:
-                        print(f"[metric] com_z_vel: {vel_vec[2]:.4f}", flush=True)
-                    if "com_x_vel" in LOG_METRICS:
-                        print(f"[metric] com_x_vel: {vel_vec[0]:.4f}", flush=True)
-                self._last_position = pos
+    def _log_trial_info(self) -> None:
+        global LOG_METRICS, SIM_TIME
+        # ── per-timestep metrics ───────────────────────────────────────────
+        if any(m in LOG_METRICS for m in ("velocity", "com_z_vel", "com_x_vel")):
+            now = time.time()
+            pos = self.agent.world.global_position.copy()
+            if self._last_position is not None:
+                vel_vec = (pos - self._last_position) / SIM_TIMESTEP
+                if "velocity" in LOG_METRICS:
+                    print(f"[metric] velocity: {np.linalg.norm(vel_vec[:2]):.4f}", flush=True)
+                if "com_z_vel" in LOG_METRICS:
+                    print(f"[metric] com_z_vel: {vel_vec[2]:.4f}", flush=True)
+                if "com_x_vel" in LOG_METRICS:
+                    print(f"[metric] com_x_vel: {vel_vec[0]:.4f}", flush=True)
+            self._last_position = pos
 
-            if "com_height" in LOG_METRICS:
-                print(f"[metric] com_height: {self.agent.world.global_position[2]:.4f}", flush=True)
+        if "com_height" in LOG_METRICS:
+            print(f"[metric] com_height: {self.agent.world.global_position[2]:.4f}", flush=True)
 
-            # if "com_z_vel" in LOG_METRICS:
-            #     print(f"[metric] com_z_vel: {self.agent.world.global_linvel[2]:.4f}", flush=True)
+        # if "com_z_vel" in LOG_METRICS:
+        #     print(f"[metric] com_z_vel: {self.agent.world.global_linvel[2]:.4f}", flush=True)
 
-            # if "com_x_vel" in LOG_METRICS:
-            #     print(f"[metric] com_x_vel: {self.agent.world.global_linvel[0]:.4f}", flush=True)
+        # if "com_x_vel" in LOG_METRICS:
+        #     print(f"[metric] com_x_vel: {self.agent.world.global_linvel[0]:.4f}", flush=True)
 
-            if "latency_ms" in LOG_METRICS:
-                _t0 = time.perf_counter()
-            # ── end metrics setup ──────────────────────────────────────────────
+        if "latency_ms" in LOG_METRICS:
+            _t0 = time.perf_counter()
+        # ── end metrics setup ──────────────────────────────────────────────
 
-            # reached_ball — stop trigger for Run E
-            if "velocity" in LOG_METRICS:
-                print(self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0)
-                if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0:
-                    print("[metric] reached_ball", flush=True)
+        # reached_ball — stop trigger for Run E
+        # print("velocity" in LOG_METRICS)
+        if "velocity" in LOG_METRICS:
+            print(self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0)
+            if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0:
+                print("[metric] reached_ball", flush=True)
 
-            # ── post-update metrics ────────────────────────────────────────────
-            if "latency_ms" in LOG_METRICS:
-                elapsed_ms = (time.perf_counter() - _t0) * 1000
-                print(f"[metric] latency_ms: {elapsed_ms:.3f}", flush=True)
+        # ── post-update metrics ────────────────────────────────────────────
+        if "latency_ms" in LOG_METRICS:
+            elapsed_ms = (time.perf_counter() - _t0) * 1000
+            print(f"[metric] latency_ms: {elapsed_ms:.3f}", flush=True)
 
-            if "joint_torques" in LOG_METRICS:
-                torques = self.agent.robot.get_joint_torques()
-                print(f"[metric] joint_torques: {json.dumps(torques)}", flush=True)
+        if "joint_torques" in LOG_METRICS:
+            torques = self.agent.robot.get_joint_torques()
+            print(f"[metric] joint_torques: {json.dumps(torques)}", flush=True)
 
-            if "joint_angles" in LOG_METRICS:
-                angles = self.agent.robot.get_joint_angles()
-                print(f"[metric] joint_angles: {json.dumps(angles)}", flush=True)
-            # ── end post-update metrics ────────────────────────────────────────
+        if "joint_angles" in LOG_METRICS:
+            angles = self.agent.robot.get_joint_angles()
+            print(f"[metric] joint_angles: {json.dumps(angles)}", flush=True)
+        # ── end post-update metrics ────────────────────────────────────────
+
+        if self.agent.world.playmode is PlayModeEnum.OUR_GOAL:
+            logger.info("scored_at:", self.agent.world.game_time)
 
 
     # --------------------------------------------------

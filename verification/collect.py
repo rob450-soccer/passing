@@ -1,5 +1,5 @@
 # --- collect.py ---
-import subprocess, time, random, datetime, json, ast, sys, argparse
+import subprocess, time, random, datetime, json, ast, sys, argparse, select
 import utils
 from schema import TrialData
 import os
@@ -49,18 +49,19 @@ RUN_CONFIG = {
         "timeout":      180,
         "n_players":     2,
         "reset_ball":    True,    # full game scenario, use default center position
-       "log_metrics":  [
-            "com_height",
-            "com_z_vel",
-            "com_x_vel",
-            "velocity",
-            "collision",
-            "out_of_bounds",
-            "latency_ms",
-            "msg_sent",
-            "msg_received",
-            "scored_at",
-        ],
+        "log_metrics": [],
+    #    "log_metrics":  [
+    #         "com_height",
+    #         "com_z_vel",
+    #         "com_x_vel",
+    #         "velocity",
+    #         "collision",
+    #         "out_of_bounds",
+    #         "latency_ms",
+    #         "msg_sent",
+    #         "msg_received",
+    #         "scored_at",
+    #     ],
     },
     "E": { #test 9
         "stop_trigger": "reached_ball",
@@ -121,8 +122,8 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
     try:
         # Start server
         server, _ = utils.popen_with_logged_output(
-            # ["hatch", "run", "rcssservermj", "--no-render"],
-            ["hatch", "run", "rcssservermj"],
+            ["hatch", "run", "rcssservermj", "--no-render"],
+            # ["hatch", "run", "rcssservermj"],
             cwd=DIRS["server"], logger=logger, label="server", start_new_session=True,
             env={
                 **os.environ,
@@ -169,8 +170,31 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
 
         # Read output from player 1 only — it is always the passer and
         # the source of all logged metrics. Teammates run silently.
+        #
+        # select() is used so the timeout fires even if the player goes
+        # silent and readline() would otherwise block indefinitely.
         start_time = time.time()
         while True:
+            elapsed   = time.time() - start_time
+            remaining = config["timeout"] - elapsed
+
+            if remaining <= 0:
+                data.timed_out = True
+                logger.warning(utils.color(
+                    f"[run {run_id}] trial {trial_number} timed out "
+                    f"after {config['timeout']}s", "yellow"
+                ))
+                break
+
+            ready, _, _ = select.select([players[0].stdout], [], [], remaining)
+            if not ready:
+                data.timed_out = True
+                logger.warning(utils.color(
+                    f"[run {run_id}] trial {trial_number} timed out "
+                    f"after {config['timeout']}s", "yellow"
+                ))
+                break
+
             line = players[0].stdout.readline()
 
             if not line:
@@ -182,17 +206,10 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
             line = line.rstrip("\n")
             logger.info(f"[player1] {line}")
             data.log_lines.append(line)
+            data.total_steps += 1
             _parse_line(line, data)
 
             if config["stop_trigger"] in line:
-                break
-
-            if time.time() - start_time > config["timeout"]:
-                data.timed_out = True
-                logger.warning(utils.color(
-                    f"[run {run_id}] trial {trial_number} timed out "
-                    f"after {config['timeout']}s", "yellow"
-                ))
                 break
 
     finally:
@@ -245,7 +262,6 @@ def _parse_line(line: str, data: TrialData):
         elif "target_pos:"    in line: data.ball_target_pos = tuple(ast.literal_eval(line.split("target_pos:")[1].strip()))
         elif "joint_angles:"  in line: data.joint_angles.append(json.loads(line.split("joint_angles:")[1].strip()))
         elif "joint_torques:" in line: data.joint_torques.append(json.loads(line.split("joint_torques:")[1].strip()))
-        data.total_steps += 1
     except (ValueError, IndexError, SyntaxError):
         pass
 
@@ -258,10 +274,31 @@ def random_point():
             round(random.uniform(ymin, ymax), 3))
 
 
+def _teammate_starts() -> list[tuple]:
+    """
+    Returns start positions for a two-player trial:
+      - Player 1: upper-left quadrant  (x in [-4.5, 0], y in [0, 3.0])
+      - Player 2: lower-left quadrant  (x in [-4.5, 0], y in [-3.0, 0])
+    """
+    xmin, xmax, ymin, ymax = FIELD          # (-4.5, 4.5, -3.0, 3.0)
+    x_mid = (xmin + xmax) / 2              # 0.0  — left half boundary
+    y_mid = (ymin + ymax) / 2              # 0.0  — vertical midpoint
+
+    upper = (round(random.uniform(xmin, x_mid), 3),
+             round(random.uniform(y_mid, ymax), 3))
+    lower = (round(random.uniform(xmin, x_mid), 3),
+             round(random.uniform(ymin, y_mid), 3))
+    return [upper, lower]
+
+
 def configs_for(run_id: str) -> list[tuple]:
     """
     Returns a list of (obstacles, start_positions, ball_pos) tuples.
     start_positions is always a list — one entry per player in n_players.
+
+    For multi-player runs, positions are no longer fully random:
+      - Player 1 always starts in the upper-left quadrant
+      - Player 2 always starts in the lower-left quadrant
 
     A: 10 obstacle configs x 10 positions = 100 trials, 1 player
        robot only plans a path, does not move
@@ -274,8 +311,6 @@ def configs_for(run_id: str) -> list[tuple]:
     E: 20 trials, fixed straight-on approach, 1 player
        robot walks directly to ball, velocity logged every timestep
     """
-    n = RUN_CONFIG[run_id]["n_players"]
-
     if run_id == "A":
         obs_configs = [[random_point() for _ in range(3)] for _ in range(10)]
         starts      = [random_point() for _ in range(10)]
@@ -286,11 +321,21 @@ def configs_for(run_id: str) -> list[tuple]:
             for i in range(10)
         ]
 
-    if run_id in ("B", "C", "D"):
+    if run_id in ("B", "D"):
         return [
             (
                 [random_point() for _ in range(3)],
-                [random_point() for _ in range(n)],   # one start per player
+                _teammate_starts(),                    # upper-left / lower-left
+                random_point(),
+            )
+            for _ in range(100)
+        ]
+
+    if run_id == "C":
+        return [
+            (
+                [random_point() for _ in range(3)],
+                [random_point()],                      # single player, fully random
                 random_point(),
             )
             for _ in range(100)
