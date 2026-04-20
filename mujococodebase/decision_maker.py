@@ -17,7 +17,7 @@ from mujococodebase.planning.path_viz_emitter import emit as _viz_emit
 
 logger = logging.getLogger(__file__)
 
-ROBOT_RADIUS = 0.23 # meters
+ROBOT_RADIUS = 3 # grid cells
 
 
 class State(Enum):
@@ -674,6 +674,13 @@ class DecisionMaker:
         # or half way from ball to goal along ball-to-goal line.
         receive_distance = min(4.0, 0.5 * ball_to_goal_norm)
         self.receive_world_pos = ball_world_pos + ball_to_goal_dir * receive_distance
+        # Offset 0.5 m along the direction normal to ball-to-goal, toward the agent.
+        if ball_to_goal_norm > 0:
+            normal_dir = np.array([-ball_to_goal_dir[1], ball_to_goal_dir[0]])
+            receive_to_agent = agent_world_pos[:2] - self.receive_world_pos
+            if np.dot(normal_dir, receive_to_agent) < 0:
+                normal_dir = -normal_dir
+            self.receive_world_pos = self.receive_world_pos + normal_dir * 0.75
         receive_orientation = MathOps.vector_angle(ball_to_goal) if ball_to_goal_norm > 0 else -180.0
         self.receive_grid_pos = np.array([
             round(self.receive_world_pos[0] * self.grid_scale),
