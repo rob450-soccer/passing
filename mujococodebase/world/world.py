@@ -42,6 +42,12 @@ class World:
         self.global_position: np.ndarray = np.zeros(3)
         self.ball_pos: np.ndarray = np.zeros(3)
         self.ball_velocity: np.ndarray = np.zeros(3)
+        self.ball_velocity_vision: np.ndarray = np.zeros(3)
+        """Ball linear velocity from vision (finite-diff); not overwritten by (ballGT)."""
+        self.ball_velocity_from_gt: bool = False
+        """True when ``ball_velocity`` was set from (ballGT) in the last sense message."""
+        self.mj_leg_actuator_torque_peak_nm: float | None = None
+        """Max |leg motor torque| (Nm) from simulator (tauGT), if the last sense included it."""
         self.is_ball_pos_updated: bool = False
         self.our_team_players: list[OtherRobot] = [OtherRobot() for _ in range(self.MAX_PLAYERS_PER_TEAM)]
         self.their_team_players: list[OtherRobot] = [OtherRobot(is_teammate=False) for _ in range(self.MAX_PLAYERS_PER_TEAM)]

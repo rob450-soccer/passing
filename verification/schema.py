@@ -25,6 +25,8 @@ class TrialData:
     com_x_velocities:    list[float] = field(default_factory=list)
     joint_angles:        list[dict]  = field(default_factory=list)
     joint_torques:       list[dict]  = field(default_factory=list)
+    # Max |τ| over trial from [metric] joint_torque_max_nm (MuJoCo leg motors if tauGT, else commanded PD).
+    joint_torque_peak_nm: float | None = None
     collision_times:     list[float] = field(default_factory=list)
     latencies_ms:        list[float] = field(default_factory=list)
     out_of_bounds_steps: int         = 0

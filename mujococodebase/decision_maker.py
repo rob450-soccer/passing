@@ -26,9 +26,18 @@ ROBOT_RADIUS = 0.23 # meters
 LOG_METRICS = set(os.environ.get("LOG_METRICS", "").split(","))
 SIM_TIMESTEP = 0.02
 
+# Set BALL_STOP_DEBUG=1 in the environment for throttled stdout lines when diagnosing
+# tests 5/6 "ball kicked then stopped" / [metric] ball_stopped.
+def _ball_stop_debug_enabled() -> bool:
+    return os.environ.get("BALL_STOP_DEBUG", "").lower() in ("1", "true", "yes")
+
 # Match passing/verification/evaluators.py (tests 5B/5C, 6B/6C).
 MAX_KICK_TORQUE_NM = 100.0
 JOINT_LIMIT_MARGIN_DEG = 1.0
+
+# Tests 5/6: XY speed below this counts as "stopped". |v|<=0.01 missed slow rolls and jitter;
+# Z noise from sim is ignored by using horizontal norm only.
+_BALL_STOPPED_SPEED_XY_THRESH = 0.15
 
 # Env keys that enable logging of PD torques implied by the last motor command
 # (same law as rcssservermj DefaultActionParser + Simulation.ctrl_motor).
@@ -66,6 +75,7 @@ class DecisionMaker:
         self._current_state = State.NEUTRAL # This will be immedietely overwritten
         self.has_initialized = False
         self.grid_scale: int = 10  # each grid cell = 10 cm in world space
+        logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
 
         # Pathfinding
         self.path_targets = {}
@@ -122,6 +132,9 @@ class DecisionMaker:
 
         # testing
         self.has_kicked = False
+        self._ball_stop_debug_last_ts: float = 0.0
+        # Log [metric] joint_torque_max_nm only when the per-step peak hits a new high (reduces spam).
+        self._joint_torque_historical_max_nm: float = -1.0
 
     # --------------------------------------------------
     # Core Loop
@@ -133,6 +146,7 @@ class DecisionMaker:
 
         self.is_passer = self._is_passer()
         self._check_global_interrupts()
+        self._update_ball_kick_streak()
         self._check_and_replan()
         #print(self._current_state)
 
@@ -424,8 +438,7 @@ class DecisionMaker:
         current_time = time.time()
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
-        ball_vel = self.agent.world.ball_velocity[:2]
-        currently_kicking = self._is_ball_in_kicking_motion(ball_vel)
+        currently_kicking = self._ball_kick_speed_streak >= 3
 
         MUST_REPLAN_THRESHOLD = 6 # proportional to the replan_cooldown
 
@@ -566,10 +579,25 @@ class DecisionMaker:
             print(f"[metric] latency_ms: {elapsed_ms:.3f}")
 
         if LOG_METRICS & _LOG_COMMANDED_PD_TORQUE_KEYS:
-            torques = _commanded_pd_torques_nm(self.agent.robot)
-            bad_torques = {k: v for k, v in torques.items() if abs(v) > MAX_KICK_TORQUE_NM}
-            if bad_torques:
-                print(f"[metric] joint_torques: {json.dumps(bad_torques)}")
+            w = self.agent.world
+            server_peak = w.mj_leg_actuator_torque_peak_nm
+            if server_peak is not None:
+                peak_nm = float(server_peak)
+                torques = None
+            else:
+                torques = _commanded_pd_torques_nm(self.agent.robot)
+                peak_nm = max((abs(v) for v in torques.values()), default=0.0)
+            # Peak torque for tests / plots: prefer MuJoCo leg motors (tauGT), else commanded PD.
+            if peak_nm > self._joint_torque_historical_max_nm + 1e-9:
+                self._joint_torque_historical_max_nm = peak_nm
+                print(f"[metric] joint_torque_max_nm: {peak_nm:.6f}")
+            if server_peak is not None:
+                if peak_nm > MAX_KICK_TORQUE_NM:
+                    print(f'[metric] joint_torques: {json.dumps({"server_leg_peak_nm": peak_nm})}')
+            elif torques is not None:
+                bad_torques = {k: v for k, v in torques.items() if abs(v) > MAX_KICK_TORQUE_NM}
+                if bad_torques:
+                    print(f"[metric] joint_torques: {json.dumps(bad_torques)}")
 
         if "joint_angles" in LOG_METRICS:
             angles = self.agent.robot.motor_positions
@@ -584,14 +612,42 @@ class DecisionMaker:
         # ── end post-update metrics ────────────────────────────────────────
 
         if "ball_stopped" in LOG_METRICS:
+            w_ball = self.agent.world
+            v_ball = w_ball.ball_velocity
+            v_xy = float(np.linalg.norm(v_ball[:2]))
+            can_measure_ball_stop = w_ball.is_ball_pos_updated or w_ball.ball_velocity_from_gt
+
+            if _ball_stop_debug_enabled():
+                now = time.monotonic()
+                if now - self._ball_stop_debug_last_ts >= 0.15:
+                    self._ball_stop_debug_last_ts = now
+                    vn = float(np.linalg.norm(v_ball))
+                    print(
+                        "[debug ball_stop] "
+                        f"state={self._current_state.name} "
+                        f"has_kicked={self.has_kicked} "
+                        f"metrics_done={getattr(self, '_pass_metrics_logged', False)} "
+                        f"ball_seen={w_ball.is_ball_pos_updated} "
+                        f"v_norm={vn:.5f} v_xy={v_xy:.5f} "
+                        f"ball_xy={w_ball.ball_pos[:2].tolist()} "
+                        f"kick_streak={self._ball_kick_speed_streak} "
+                        f"would_stop={can_measure_ball_stop and v_xy <= _BALL_STOPPED_SPEED_XY_THRESH}"
+                    )
+
             if not self.has_kicked:
-                if self._is_ball_in_kicking_motion(self.agent.world.ball_velocity):
+                if self._ball_kick_speed_streak >= 3:
                     self.has_kicked = True
-                    print("HAS KICKED")
-            else:
-                print(f"BALL VELOCITY: {np.linalg.norm(self.agent.world.ball_velocity)}")
-            if self.has_kicked and np.linalg.norm(self.agent.world.ball_velocity) <= 0.01:
-                print("[test 5,6] ball kicked then stopped")
+            elif not getattr(self, "_pass_metrics_logged", False):
+                if can_measure_ball_stop and v_xy <= _BALL_STOPPED_SPEED_XY_THRESH:
+                    self._pass_metrics_logged = True
+                    bx = float(self.agent.world.ball_pos[0])
+                    by = float(self.agent.world.ball_pos[1])
+                    print(f"[metric] ball_stopped: ({bx:.6f}, {by:.6f})", flush=True)
+                    if "target_pos" in LOG_METRICS and hasattr(self, "passing_world_pos"):
+                        tx = float(self.passing_world_pos[0])
+                        ty = float(self.passing_world_pos[1])
+                        print(f"[metric] target_pos: ({tx:.6f}, {ty:.6f})", flush=True)
+                    print("[test 5,6] ball kicked then stopped", flush=True)
 
 
     # --------------------------------------------------
@@ -703,7 +759,6 @@ class DecisionMaker:
             self.agent.world.field.get_length() * self.grid_scale, 
             self.agent.world.field.get_width() * self.grid_scale
         )
-        logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
         # add obstacle locations (enemies and teammates, excluding self)
         obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]
@@ -715,8 +770,12 @@ class DecisionMaker:
 
         # convert location of line in front of the goal to grid coordinates
         goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
-        goal_width = abs(self.agent.world.field.field_landmarks.landmarks["g_lup"][1] 
-                         - self.agent.world.field.field_landmarks.landmarks["g_llp"][1])
+        lm = self.agent.world.field.field_landmarks.landmarks
+        if "g_lup" in lm and "g_llp" in lm:
+            goal_width = float(abs(lm["g_lup"][1] - lm["g_llp"][1]))
+        else:
+            # Vision may not have seen goal posts yet at kickoff / first _initialize().
+            goal_width = float(self.agent.world.field.get_goal_width())
         offsets = np.array(range(
             round((goal_world_pos[1] - goal_width/2) * self.grid_scale), 
             round((goal_world_pos[1] + goal_width/2) * self.grid_scale)
@@ -836,16 +895,26 @@ class DecisionMaker:
             # deterministic tie-breaker
             return self.agent.world.number == 1
 
-    def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
+    def _update_ball_kick_streak(self) -> None:
+        """Advance kick-detection streak from vision-only velocity (not simulator ballGT).
+
+        Ground-truth ``ball_velocity`` can be >0.5 m/s while the ball is settling at spawn;
+        vision finite-difference velocity stays near zero until the ball actually moves in view.
+
+        Only ``PLAY_ON`` counts so kickoff / set-piece ball motion does not arm ``has_kicked``
+        before the pass. Updated once per frame.
         """
-        True only after ‖ball_velocity‖ stays above 0.5 m/s for 5 consecutive updates.
-        Any update at or below 0.5 m/s resets the streak.
-        """
-        if np.linalg.norm(ball_velocity) > 0.5:
+        w = self.agent.world
+        if w.playmode != PlayModeEnum.PLAY_ON:
+            self._ball_kick_speed_streak = 0
+            return
+        if not w.is_ball_pos_updated:
+            self._ball_kick_speed_streak = 0
+            return
+        if np.linalg.norm(w.ball_velocity_vision) > 0.5:
             self._ball_kick_speed_streak += 1
         else:
             self._ball_kick_speed_streak = 0
-        return self._ball_kick_speed_streak >= 3
 
     def _get_beam_pose(self, random_poses: bool):
         """
@@ -910,6 +979,9 @@ def _commanded_pd_torques_nm(robot) -> dict[str, float]:
 
     Perception and motor effector messages use joint angle/velocity in degrees;
     the server converts q, dq to radians before applying gains.
+
+    This matches the client's motor-command path, not a direct read of mjData.qfrc_*;
+    use for test 5B-style caps on commanded torque.
     """
     torques: dict[str, float] = {}
     for name in robot.ROBOT_MOTORS:

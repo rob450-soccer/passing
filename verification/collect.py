@@ -267,6 +267,9 @@ def _parse_line(line: str, data: TrialData):
         elif "target_pos:"    in line: data.ball_target_pos = tuple(ast.literal_eval(line.split("target_pos:")[1].strip()))
         elif "joint_angles:"  in line: data.joint_angles.append(json.loads(line.split("joint_angles:")[1].strip()))
         elif "joint_torques:" in line: data.joint_torques.append(json.loads(line.split("joint_torques:")[1].strip()))
+        elif "joint_torque_max_nm:" in line:
+            v = float(line.split("joint_torque_max_nm:")[1].strip())
+            data.joint_torque_peak_nm = v if data.joint_torque_peak_nm is None else max(data.joint_torque_peak_nm, v)
         data.total_steps += 1
     except (ValueError, IndexError, SyntaxError):
         pass
