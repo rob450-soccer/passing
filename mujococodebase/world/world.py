@@ -41,6 +41,9 @@ class World:
         self._global_cheat_position: np.ndarray = np.zeros(3)
         self.global_position: np.ndarray = np.zeros(3)
         self.ball_pos: np.ndarray = np.zeros(3)
+        self.ball_pos_gt: np.ndarray = np.zeros(3)
+        self.ball_pos_from_gt: bool = False
+        """True when ``ball_pos_gt`` was set from (ballGT) in the last sense message."""
         self.ball_velocity: np.ndarray = np.zeros(3)
         self.ball_velocity_vision: np.ndarray = np.zeros(3)
         """Ball linear velocity from vision (finite-diff); not overwritten by (ballGT)."""

@@ -206,6 +206,7 @@ class WorldParser:
         robot.accelerometer = np.array(perception_dict["ACC"]["a"])
 
         world.is_ball_pos_updated = False
+        world.ball_pos_from_gt = False
         world.ball_velocity_from_gt = False
         world.ball_velocity = np.zeros(3)
         world.ball_velocity_vision = np.zeros(3)
@@ -275,6 +276,16 @@ class WorldParser:
             if isinstance(gt, list):
                 gt = gt[-1]
             if isinstance(gt, dict):
+                pos = gt.get("pos")
+                if isinstance(pos, list) and len(pos) >= 3:
+                    try:
+                        world.ball_pos_gt = np.array(
+                            [float(pos[0]), float(pos[1]), float(pos[2])],
+                            dtype=np.float64,
+                        )
+                        world.ball_pos_from_gt = True
+                    except (TypeError, ValueError):
+                        pass
                 vel = gt.get("vel")
                 if isinstance(vel, list) and len(vel) >= 3:
                     world.ball_velocity = np.array(

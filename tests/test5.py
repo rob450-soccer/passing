@@ -20,6 +20,7 @@ import json
 import math
 import os
 import random
+import selectors
 import subprocess
 import sys
 import time
@@ -53,8 +54,9 @@ JOINT_LIMITS = verification_conftest.JOINT_LIMITS
 TIMEOUT_SECONDS = 60
 STOP_TRIGGER = "ball kicked then stopped"
 
-# Same metric keys as verification/collect.py RUN_CONFIG["B"].
-LOG_METRICS_ENV = "joint_angles,joint_torques,ball_stopped,target_pos"
+# Same metric keys as verification/collect.py RUN_CONFIG["B"], plus receive_target_pos
+# so Part A can score against the planned receive target (not receiver robot position).
+LOG_METRICS_ENV = "joint_angles,joint_torques,ball_stopped,target_pos,receive_target_pos"
 
 # Field bounds for random trials (aligned with verification/collect.py run B).
 FIELD_X_MIN, FIELD_X_MAX = -4.5, 4.5
@@ -75,6 +77,8 @@ def parse_metric_line(line: str, data: TrialData) -> None:
     try:
         if "ball_stopped:" in line:
             data.ball_final_pos = tuple(ast.literal_eval(line.split("ball_stopped:")[1].strip()))
+        elif "receive_target_pos:" in line:
+            data.ball_target_pos = tuple(ast.literal_eval(line.split("receive_target_pos:")[1].strip()))
         elif "target_pos:" in line:
             data.ball_target_pos = tuple(ast.literal_eval(line.split("target_pos:")[1].strip()))
         elif "joint_angles:" in line:
@@ -97,17 +101,12 @@ def max_logged_torque_nm(trial: TrialData) -> float:
     return 0.0
 
 
-def percent_target_error(trial: TrialData) -> float | None:
-    """Relative error % = 100 * ||obs - target|| / ||target|| (test5.txt Part A)."""
-    if not trial.ball_final_pos or not trial.ball_target_pos:
+def kick_length_m(trial: TrialData) -> float | None:
+    """Kick length = ||ball_stopped|| from origin (0,0)."""
+    if not trial.ball_final_pos:
         return None
-    ox, oy = trial.ball_final_pos
-    tx, ty = trial.ball_target_pos
-    num = math.hypot(ox - tx, oy - ty)
-    den = math.hypot(tx, ty)
-    if den < 1e-9:
-        return None
-    return 100.0 * num / den
+    x, y = trial.ball_final_pos
+    return math.hypot(x, y)
 
 
 def apply_timeout_fallback(
@@ -170,8 +169,8 @@ def run_test():
     total_trials = 5 # 100
     passed_a = passed_b = passed_c = 0
     trial_errors_m: list[float] = []
-    trial_pct_err: list[float] = []
     trial_max_torque: list[float] = []
+    trial_kick_lengths_m: list[float] = []
 
     exit_code = 0
 
@@ -232,31 +231,61 @@ def run_test():
                 start_time = time.time()
                 timed_out = False
 
-                while True:
-                    line = player_processes[0].stdout.readline()
-                    if not line:
-                        if player_processes[0].poll() is not None:
-                            data.player_crashed = True
+                selector = selectors.DefaultSelector()
+                watched = {}
+                for i, proc in enumerate(player_processes, start=1):
+                    if proc.stdout is not None:
+                        selector.register(proc.stdout, selectors.EVENT_READ, data=i)
+                        watched[i] = proc
+
+                try:
+                    while True:
+                        events = selector.select(timeout=0.2)
+                        if not events:
+                            if time.time() - start_time > TIMEOUT_SECONDS:
+                                timed_out = True
+                                logger.warning(
+                                    util.color(
+                                        f"[TIMEOUT] Trial {trial_count}: no '{STOP_TRIGGER}' within {TIMEOUT_SECONDS}s",
+                                        "yellow",
+                                    )
+                                )
+                                break
+                            continue
+
+                        for key, _ in events:
+                            player_idx = key.data
+                            proc = watched[player_idx]
+                            line = key.fileobj.readline()
+                            if not line:
+                                if proc.poll() is not None:
+                                    try:
+                                        selector.unregister(key.fileobj)
+                                    except Exception:
+                                        pass
+                                    watched.pop(player_idx, None)
+                                    if player_idx == 1:
+                                        data.player_crashed = True
+                                        break
+                                continue
+
+                            line = line.rstrip("\n")
+                            logger.info(f"[player{player_idx}] {line}")
+                            data.log_lines.append(f"[player{player_idx}] {line}")
+                            parse_metric_line(line, data)
+
+                            if STOP_TRIGGER in line:
+                                logger.info(f"Stop trigger detected from player {player_idx}")
+                                watched.clear()
+                                break
+
+                        if not watched or data.player_crashed:
                             break
-                        continue
-
-                    line = line.rstrip("\n")
-                    logger.info(f"[player1] {line}")
-                    data.log_lines.append(line)
-                    parse_metric_line(line, data)
-
-                    if STOP_TRIGGER in line:
-                        break
-
-                    if time.time() - start_time > TIMEOUT_SECONDS:
-                        timed_out = True
-                        logger.warning(
-                            util.color(
-                                f"[TIMEOUT] Trial {trial_count}: no '{STOP_TRIGGER}' within {TIMEOUT_SECONDS}s",
-                                "yellow",
-                            )
-                        )
-                        break
+                finally:
+                    try:
+                        selector.close()
+                    except Exception:
+                        pass
 
                 if data.player_crashed:
                     logger.error(util.color(f"[FAIL] Trial {trial_count}: Player process crashed.", "red"))
@@ -269,9 +298,10 @@ def run_test():
                 err_m = kick_error(data)
                 if err_m is not None:
                     trial_errors_m.append(err_m)
-                    pct = percent_target_error(data)
-                    if pct is not None:
-                        trial_pct_err.append(pct)
+                klen = kick_length_m(data)
+                if klen is not None:
+                    trial_kick_lengths_m.append(klen)
+                    logger.info(f"[metric] kick_length_m: {klen:.3f}")
 
                 mt = max_logged_torque_nm(data)
                 trial_max_torque.append(mt)
@@ -331,18 +361,19 @@ def run_test():
                 "blue",
             )
         )
-    if trial_pct_err:
-        avg_p = sum(trial_pct_err) / len(trial_pct_err)
-        logger.info(
-            util.color(
-                f"Aggregate Part A: mean relative error = {avg_p:.2f}% (vs ||target||)",
-                "blue",
-            )
-        )
     if trial_max_torque:
         logger.info(
             util.color(
                 f"Aggregate Part B: global max |torque| over all trials = {max(trial_max_torque):.2f} Nm",
+                "blue",
+            )
+        )
+    if trial_kick_lengths_m:
+        avg_k = sum(trial_kick_lengths_m) / len(trial_kick_lengths_m)
+        logger.info(util.color(f"Average kick length: {avg_k:.4f} m", "blue"))
+        logger.info(
+            util.color(
+                f"Aggregate kick length: mean ||ball_stopped|| = {avg_k:.4f} m over {len(trial_kick_lengths_m)} trials",
                 "blue",
             )
         )
@@ -366,23 +397,36 @@ def run_test():
 
         out_dir = os.path.join(TESTS_DIR, "output")
         os.makedirs(out_dir, exist_ok=True)
-        plot_path = os.path.join(out_dir, "test5_error_histogram.png")
+        err_plot_path = os.path.join(out_dir, "test5_error_histogram.png")
+        kick_len_plot_path = os.path.join(out_dir, "test5_kick_length_histogram.png")
         if trial_errors_m:
             fig, ax = plt.subplots(figsize=(12, 4))
             bins = min(20, max(5, len(trial_errors_m) // 5))
             ax.hist(trial_errors_m, bins=bins, color="steelblue", edgecolor="black", alpha=0.8)
             ax.axvline(PASS_THRESHOLD, color="crimson", linestyle=":", linewidth=2, label=f"threshold={PASS_THRESHOLD} m")
-            ax.set_title("Test 5 Part A — Euclidean kick error (m)")
+            ax.set_title("Test 5 Part A — Kick error (m)")
             ax.set_xlabel("Error (m)")
             ax.set_ylabel("Trial count")
             ax.legend()
             ax.grid(axis="y", alpha=0.3)
             fig.tight_layout()
-            fig.savefig(plot_path, dpi=150)
+            fig.savefig(err_plot_path, dpi=150)
             plt.close(fig)
-            logger.info(f"Saved error histogram: {plot_path}")
+            logger.info(f"Saved error histogram: {err_plot_path}")
+        if trial_kick_lengths_m:
+            fig, ax = plt.subplots(figsize=(12, 4))
+            bins = min(20, max(5, len(trial_kick_lengths_m) // 5))
+            ax.hist(trial_kick_lengths_m, bins=bins, color="darkorange", edgecolor="black", alpha=0.8)
+            ax.set_title("Test 5 — Kick length (m)")
+            ax.set_xlabel("Kick length from origin (m)")
+            ax.set_ylabel("Trial count")
+            ax.grid(axis="y", alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(kick_len_plot_path, dpi=150)
+            plt.close(fig)
+            logger.info(f"Saved kick-length histogram: {kick_len_plot_path}")
     except ImportError:
-        logger.info("matplotlib not installed; skipped error histogram.")
+        logger.info("matplotlib not installed; skipped plots.")
 
     sys.exit(exit_code)
 
