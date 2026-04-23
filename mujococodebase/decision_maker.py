@@ -555,7 +555,7 @@ class DecisionMaker:
         # ── end post-update metrics ────────────────────────────────────────
 
         if self.agent.world.playmode is PlayModeEnum.OUR_GOAL:
-            logger.info("scored_at:", self.agent.world.game_time)
+            logger.info(f"scored_at: {self.agent.world.game_time}")
 
 
     # --------------------------------------------------
