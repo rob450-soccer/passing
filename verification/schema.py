@@ -38,6 +38,7 @@ class TrialData:
     messages_received:     int          = 0
     player_crashed:        bool         = False
     timed_out:             bool         = False
+    scored:                bool         = False  # ← added
 
     def save(self, data_dir="data"):
         os.makedirs(data_dir, exist_ok=True)

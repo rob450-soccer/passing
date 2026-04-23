@@ -46,7 +46,7 @@ RUN_CONFIG = {
     },
     "D": { #test 7-8
         "stop_trigger": "scored_at:",
-        "timeout":      180,
+        "timeout":      120,
         "n_players":     2,
         "reset_ball":    True,    # full game scenario, use default center position
         "log_metrics": [],
@@ -123,7 +123,7 @@ def run_trial(run_id, trial_number, start_positions, ball_pos, obstacles, logger
         # Start server
         server, _ = utils.popen_with_logged_output(
             ["hatch", "run", "rcssservermj", "--no-render"],
-            # ["hatch", "run", "rcssservermj"],
+            #["hatch", "run", "rcssservermj"],
             cwd=DIRS["server"], logger=logger, label="server", start_new_session=True,
             env={
                 **os.environ,
@@ -255,7 +255,9 @@ def _parse_line(line: str, data: TrialData):
         elif "latency_ms:"    in line: data.latencies_ms.append(float(line.split("latency_ms:")[1].strip()))
         elif "collision at:"  in line: data.collision_times.append(float(line.split("collision at:")[1].strip()))
         elif "out_of_bounds"  in line: data.out_of_bounds_steps += 1
-        elif "scored_at:"     in line: data.time_to_score_seconds = float(line.split("scored_at:")[1].strip())
+        elif "scored_at:"     in line: 
+            data.time_to_score_seconds = float(line.split("scored_at:")[1].strip())
+            data.scored = True
         elif "msg_sent"       in line: data.messages_sent += 1
         elif "msg_received"   in line: data.messages_received += 1
         elif "ball_stopped:"  in line: data.ball_final_pos  = tuple(ast.literal_eval(line.split("ball_stopped:")[1].strip()))
