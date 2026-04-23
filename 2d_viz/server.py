@@ -105,7 +105,10 @@ def _udp_thread(port: int) -> None:
                 if payload.get("event") == "obstacle_join":
                     location = payload.get("location")
                     if isinstance(location, list) and len(location) >= 2:
-                        _obstacles[k] = [float(location[0]), float(location[1])]
+                        if location[0] < 0:
+                            _obstacles[k] = [-float(location[0]), float(location[1])]
+                        else:
+                            _obstacles[k] = [float(location[0]), float(location[1])]
                     continue
 
                 if payload.get("event") == "obstacle_shutdown":
