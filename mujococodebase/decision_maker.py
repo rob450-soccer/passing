@@ -1,9 +1,13 @@
+import json
 import logging
+import math
 import os
 import threading
 import random
 import time
+import xml.etree.ElementTree as ET
 from enum import Enum
+from pathlib import Path
 
 import numpy as np
 from mujococodebase.utils.math_ops import MathOps
@@ -18,6 +22,34 @@ from mujococodebase.planning.path_viz_emitter import emit as _viz_emit
 logger = logging.getLogger(__file__)
 
 ROBOT_RADIUS = 0.23 # meters
+
+LOG_METRICS = set(os.environ.get("LOG_METRICS", "").split(","))
+SIM_TIMESTEP = 0.02
+
+# Set BALL_STOP_DEBUG=1 in the environment for throttled stdout lines when diagnosing
+# tests 5/6 "ball kicked then stopped" / [metric] ball_stopped.
+def _ball_stop_debug_enabled() -> bool:
+    return os.environ.get("BALL_STOP_DEBUG", "").lower() in ("1", "true", "yes")
+
+# Match passing/verification/evaluators.py (tests 5B/5C, 6B/6C).
+MAX_KICK_TORQUE_NM = 100.0
+JOINT_LIMIT_MARGIN_DEG = 1.0
+
+# Tests 5/6: XY speed below this counts as "stopped". |v|<=0.01 missed slow rolls and jitter;
+# Z noise from sim is ignored by using horizontal norm only.
+_BALL_STOPPED_SPEED_XY_THRESH = 0.15
+
+# After pass/score path completes, wait until the ball clearly leaves contact before arming
+# "kicked" (then we wait for _BALL_STOPPED_SPEED_XY_THRESH for final metrics).
+_POST_STRIKE_BALL_DISP_MIN_M = 0.1
+_POST_STRIKE_BALL_SPEED_MIN_MS = 0.2
+_BALL_STOP_STABLE_FRAMES = 2
+
+# Env keys that enable logging of PD torques implied by the last motor command
+# (same law as rcssservermj DefaultActionParser + Simulation.ctrl_motor).
+_LOG_COMMANDED_PD_TORQUE_KEYS = frozenset({"joint_commanded_pd_torques", "joint_torques"})
+
+_joint_limits_cache: dict[str, tuple[float, float]] | None = None
 
 
 class State(Enum):
@@ -49,9 +81,12 @@ class DecisionMaker:
         self._current_state = State.NEUTRAL # This will be immedietely overwritten
         self.has_initialized = False
         self.grid_scale: int = 10  # each grid cell = 10 cm in world space
+        logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
 
         # Pathfinding
         self.path_targets = {}
+
+        self._last_position: np.ndarray | None = None
         self.planning_threads: dict[str, threading.Thread] = {}
         self.planning_cancel_events: dict[str, threading.Event] = {}
         self.paths = {
@@ -99,6 +134,20 @@ class DecisionMaker:
             "robot_to_receive": 4,
         }
 
+        self._ball_kick_speed_streak = 0
+
+        # testing
+        self.has_kicked = False
+        self._post_strike_ball_watch: bool = False
+        self._post_strike_ball_xy_ref: np.ndarray = np.zeros(2)
+        self._kick_arm_ball_xy: np.ndarray = np.zeros(2)
+        self._post_kick_seen_fast: bool = False
+        self._post_kick_max_disp_m: float = 0.0
+        self._ball_stop_stable_frames: int = 0
+        self._ball_stop_debug_last_ts: float = 0.0
+        # Log [metric] joint_torque_max_nm only when the per-step peak hits a new high (reduces spam).
+        self._joint_torque_historical_max_nm: float = -1.0
+
     # --------------------------------------------------
     # Core Loop
     # --------------------------------------------------
@@ -109,8 +158,8 @@ class DecisionMaker:
 
         self.is_passer = self._is_passer()
         self._check_global_interrupts()
+        self._update_ball_kick_streak()
         self._check_and_replan()
-        #print(self._current_state)
 
         match self._current_state:
             case State.BEAMING:
@@ -129,13 +178,16 @@ class DecisionMaker:
                 self._state_wait_for_pass()
             case State.PASS:
                 self._state_pass()
-        
+
+        self._update_post_strike_kick_watch()
+
         if (self.agent.world.playmode_group not in (PlayModeGroupEnum.ACTIVE_BEAM, PlayModeGroupEnum.PASSIVE_BEAM) and 
             not self.has_initialized):
             self._initialize()
 
         self._emit_viz_tick()
         self.agent.robot.commit_motor_targets_pd()
+        self._log_trial_info()
 
     # --------------------------------------------------
     # State Transitions
@@ -399,8 +451,7 @@ class DecisionMaker:
         current_time = time.time()
         my_pos = self.agent.world.global_position[:2]
         ball_pos = self.agent.world.ball_pos[:2]
-        ball_vel = self.agent.world.ball_velocity[:2]
-        currently_kicking = self._is_ball_in_kicking_motion(ball_vel)
+        currently_kicking = self._ball_kick_speed_streak >= 3
 
         MUST_REPLAN_THRESHOLD = 6 # proportional to the replan_cooldown
 
@@ -497,6 +548,156 @@ class DecisionMaker:
             ball_pos=ball_pos,
             is_passer=self.is_passer,
         )
+    
+    def _log_trial_info(self) -> None:
+        if not LOG_METRICS:
+            return
+
+        # ── per-timestep metrics ───────────────────────────────────────────
+        if any(m in LOG_METRICS for m in ("velocity", "com_z_vel", "com_x_vel")):
+            now = time.time()
+            pos = self.agent.world.global_position.copy()
+            if self._last_position is not None:
+                vel_vec = (pos - self._last_position) / SIM_TIMESTEP
+                if "velocity" in LOG_METRICS:
+                    logger.debug(f"[metric] velocity: {np.linalg.norm(vel_vec[:2]):.4f}")
+                if "com_z_vel" in LOG_METRICS:
+                    logger.debug(f"[metric] com_z_vel: {vel_vec[2]:.4f}")
+                if "com_x_vel" in LOG_METRICS:
+                    logger.debug(f"[metric] com_x_vel: {vel_vec[0]:.4f}")
+            self._last_position = pos
+
+        if "com_height" in LOG_METRICS:
+            logger.debug(f"[metric] com_height: {self.agent.world.global_position[2]:.4f}")
+
+        # Legacy velocity diagnostics intentionally omitted here; use per-timestep metrics above.
+
+        if "latency_ms" in LOG_METRICS:
+            _t0 = time.perf_counter()
+        # ── end metrics setup ──────────────────────────────────────────────
+
+        # reached_ball — stop trigger for Run E
+        if "velocity" in LOG_METRICS:
+            if self.path_steps["robot_to_ball"] >= len(self.paths["robot_to_ball"]) > 0:
+                logger.debug("[metric] reached_ball")
+
+        # ── post-update metrics ────────────────────────────────────────────
+        if "latency_ms" in LOG_METRICS:
+            elapsed_ms = (time.perf_counter() - _t0) * 1000
+            logger.debug(f"[metric] latency_ms: {elapsed_ms:.3f}")
+
+        if LOG_METRICS & _LOG_COMMANDED_PD_TORQUE_KEYS:
+            w = self.agent.world
+            server_peak = w.mj_leg_actuator_torque_peak_nm
+            if server_peak is not None:
+                peak_nm = float(server_peak)
+                torques = None
+            else:
+                torques = _commanded_pd_torques_nm(self.agent.robot)
+                peak_nm = max((abs(v) for v in torques.values()), default=0.0)
+            # Peak torque for tests / plots: prefer MuJoCo leg motors (tauGT), else commanded PD.
+            if peak_nm > self._joint_torque_historical_max_nm + 1e-9:
+                self._joint_torque_historical_max_nm = peak_nm
+                logger.debug(f"[metric] joint_torque_max_nm: {peak_nm:.6f}")
+            if server_peak is not None:
+                if peak_nm > MAX_KICK_TORQUE_NM:
+                    logger.debug(f'[metric] joint_torques: {json.dumps({"server_leg_peak_nm": peak_nm})}')
+            elif torques is not None:
+                bad_torques = {k: v for k, v in torques.items() if abs(v) > MAX_KICK_TORQUE_NM}
+                if bad_torques:
+                    logger.debug(f"[metric] joint_torques: {json.dumps(bad_torques)}")
+
+        if "joint_angles" in LOG_METRICS:
+            angles = self.agent.robot.motor_positions
+            limits = _hinge_joint_limits()
+            bad_angles = {}
+            for joint, angle in angles.items():
+                lo, hi = limits.get(joint, (-180.0, 180.0))
+                if not (lo - JOINT_LIMIT_MARGIN_DEG <= angle <= hi + JOINT_LIMIT_MARGIN_DEG):
+                    bad_angles[joint] = angle
+            if bad_angles:
+                logger.debug(f"[metric] joint_angles: {json.dumps(bad_angles)}")
+        # ── end post-update metrics ────────────────────────────────────────
+
+        if "ball_stopped" in LOG_METRICS:
+            w_ball = self.agent.world
+            v_ball = w_ball.ball_velocity
+            v_xy = float(np.linalg.norm(v_ball[:2]))
+            has_gt_velocity = bool(w_ball.ball_velocity_from_gt)
+            # For test5/test6 we prefer simulator GT velocity; only fall back to vision if GT is absent.
+            can_measure_ball_stop = has_gt_velocity or w_ball.is_ball_pos_updated
+            ball_xy_for_metrics = self._ball_xy_for_metrics()
+            ball_xy_src = "gt" if w_ball.ball_pos_from_gt else "vision"
+
+            if _ball_stop_debug_enabled():
+                now = time.monotonic()
+                if now - self._ball_stop_debug_last_ts >= 0.15:
+                    self._ball_stop_debug_last_ts = now
+                    vn = float(np.linalg.norm(v_ball))
+                    disp = (
+                        float(np.linalg.norm(ball_xy_for_metrics - self._post_strike_ball_xy_ref))
+                        if self._post_strike_ball_watch
+                        else 0.0
+                    )
+                    logger.debug(
+                        "[debug ball_stop] "
+                        f"state={self._current_state.name} "
+                        f"has_kicked={self.has_kicked} "
+                        f"post_strike_watch={self._post_strike_ball_watch} "
+                        f"disp_since_path_end={disp:.4f} "
+                        f"kick_max_disp={self._post_kick_max_disp_m:.4f} "
+                        f"kick_seen_fast={self._post_kick_seen_fast} "
+                        f"stop_frames={self._ball_stop_stable_frames}/{_BALL_STOP_STABLE_FRAMES} "
+                        f"metrics_done={getattr(self, '_pass_metrics_logged', False)} "
+                        f"v_src={'gt' if has_gt_velocity else 'vision'} "
+                        f"ball_seen={w_ball.is_ball_pos_updated} "
+                        f"ball_xy_src={ball_xy_src} "
+                        f"v_norm={vn:.5f} v_xy={v_xy:.5f} "
+                        f"ball_xy={ball_xy_for_metrics.tolist()} "
+                        f"kick_streak={self._ball_kick_speed_streak} "
+                        f"would_stop={can_measure_ball_stop and v_xy <= _BALL_STOPPED_SPEED_XY_THRESH}"
+                    )
+
+            if not self.has_kicked:
+                if self._ball_kick_speed_streak >= 3:
+                    self._arm_kick_detection()
+            elif not getattr(self, "_pass_metrics_logged", False):
+                if not can_measure_ball_stop:
+                    self._ball_stop_stable_frames = 0
+                else:
+                    disp_from_kick = float(np.linalg.norm(ball_xy_for_metrics - self._kick_arm_ball_xy))
+                    self._post_kick_max_disp_m = max(self._post_kick_max_disp_m, disp_from_kick)
+                    if v_xy >= _POST_STRIKE_BALL_SPEED_MIN_MS:
+                        self._post_kick_seen_fast = True
+
+                    stop_candidate = (
+                        self._post_kick_seen_fast
+                        and v_xy <= _BALL_STOPPED_SPEED_XY_THRESH
+                    )
+                    if stop_candidate:
+                        self._ball_stop_stable_frames = min(
+                            _BALL_STOP_STABLE_FRAMES,
+                            self._ball_stop_stable_frames + 1,
+                        )
+                    else:
+                        # Avoid long stop delays from one noisy speed sample.
+                        self._ball_stop_stable_frames = max(0, self._ball_stop_stable_frames - 1)
+
+                    if self._ball_stop_stable_frames >= _BALL_STOP_STABLE_FRAMES:
+                        self._pass_metrics_logged = True
+                        bx = float(ball_xy_for_metrics[0])
+                        by = float(ball_xy_for_metrics[1])
+                        logger.debug(f"[metric] ball_stopped: ({bx:.6f}, {by:.6f})")
+                        if "target_pos" in LOG_METRICS and hasattr(self, "receive_world_pos"):
+                            tx = float(self.receive_world_pos[0])
+                            ty = float(self.receive_world_pos[1])
+                            logger.debug(f"[metric] target_pos: ({tx:.6f}, {ty:.6f})")
+                        if "receive_target_pos" in LOG_METRICS and hasattr(self, "receive_world_pos"):
+                            tx = float(self.receive_world_pos[0])
+                            ty = float(self.receive_world_pos[1])
+                            logger.debug(f"[metric] receive_target_pos: ({tx:.6f}, {ty:.6f})")
+                        logger.debug("[test 5,6] ball kicked then stopped")
+
 
     # --------------------------------------------------
     # Standard Helpers
@@ -559,6 +760,12 @@ class DecisionMaker:
             self._follower_path_id = id(grid_path)
 
         if self.path_follower.is_path_complete():
+            if path_key in ("passing", "scoring"):
+                # Do not set has_kicked here — path end is "at the ball", not "ball has been
+                # released and is moving". We arm a watch and set has_kicked only after
+                # separation/speed thresholds in _update_post_strike_kick_watch.
+                self._post_strike_ball_watch = True
+                self._post_strike_ball_xy_ref = self._ball_xy_for_metrics().copy()
             self._enter_state(next_state)
             return
 
@@ -567,6 +774,13 @@ class DecisionMaker:
     def _plan_path(self, path_key: str, grid_target: np.ndarray, world_target: np.ndarray):
         """Plan a single path."""
         self.path_targets[path_key] = world_target
+        if path_key == "robot_to_receive":
+            logger.debug(
+                f"[debug receive_target] robot={self.agent.world.number} "
+                f"target=({float(world_target[0]):.6f}, {float(world_target[1]):.6f})",
+            )
+        if path_key in ("passing", "scoring"):
+            self._post_strike_ball_watch = False
         self.path_ready_events[path_key].clear()
         self.path_steps[path_key] = 0
         self.time_at_last_plan[path_key] = time.time()
@@ -607,20 +821,23 @@ class DecisionMaker:
             self.agent.world.field.get_length() * self.grid_scale, 
             self.agent.world.field.get_width() * self.grid_scale
         )
-        logger.debug(f"[test1] grid world created with scale {self.grid_scale}")
         
         # add obstacle locations (enemies and teammates, excluding self)
         obstacles: list[OtherRobot] = [player for player in self.agent.world.their_team_players if player.last_seen_time is not None]
         obstacles += [player for player in self.agent.world.our_team_players if player.last_seen_time is not None and player is not self.agent]
         for robot in obstacles:
             pos = robot.position
-            logger.debug(f"Obstacle at {pos}")
+            # logger.debug(f"Obstacle at {pos}")
             self.grid_world.add_obstacle(np.array([round(pos[0] * self.grid_scale), round(pos[1] * self.grid_scale)]), obstacle_radius=ROBOT_RADIUS, inflation_amount=6)
 
         # convert location of line in front of the goal to grid coordinates
         goal_world_pos = self.agent.world.field.get_their_goal_position()[:2]
-        goal_width = abs(self.agent.world.field.field_landmarks.landmarks["g_lup"][1] 
-                         - self.agent.world.field.field_landmarks.landmarks["g_llp"][1])
+        lm = self.agent.world.field.field_landmarks.landmarks
+        if "g_lup" in lm and "g_llp" in lm:
+            goal_width = float(abs(lm["g_lup"][1] - lm["g_llp"][1]))
+        else:
+            # Vision may not have seen goal posts yet at kickoff / first _initialize().
+            goal_width = float(self.agent.world.field.get_goal_width())
         offsets = np.array(range(
             round((goal_world_pos[1] - goal_width/2) * self.grid_scale), 
             round((goal_world_pos[1] + goal_width/2) * self.grid_scale)
@@ -725,7 +942,8 @@ class DecisionMaker:
         ]
 
         if not teammates:
-            logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
+            if "solo" not in LOG_METRICS:
+                logger.debug(f"No teammate positions available. Holding current role: {'passer' if self.is_passer else 'receiver'}")
             return bool(self.is_passer)  # hold current role if no teammate data yet
 
         closest_teammate_dist = min(np.linalg.norm(p.position[:2] - considered_pos) for p in teammates)
@@ -739,11 +957,73 @@ class DecisionMaker:
             # deterministic tie-breaker
             return self.agent.world.number == 1
 
-    def _is_ball_in_kicking_motion(self, ball_velocity: np.ndarray) -> bool:
+    def _update_ball_kick_streak(self) -> None:
+        """Advance kick-detection streak from vision velocity; supplement with GT in PASS/SCORE.
+
+        Ground-truth ``ball_velocity`` can be >0.5 m/s while the ball is settling at spawn;
+        vision finite-difference velocity stays near zero until the ball actually moves in view.
+        Using GT alone would false-arm ``has_kicked`` at kickoff, so GT counts only while
+        executing PASS or SCORE (actively striking). Vision still works from any state.
+
+        Only ``PLAY_ON`` counts so kickoff / set-piece ball motion does not arm ``has_kicked``
+        before the pass. Updated once per frame.
         """
-        Returns True if the ball was kicked and is now in motion.
+        w = self.agent.world
+        if w.playmode != PlayModeEnum.PLAY_ON:
+            self._ball_kick_speed_streak = 0
+            return
+
+        vision_fast = (
+            w.is_ball_pos_updated and np.linalg.norm(w.ball_velocity_vision) > 0.5
+        )
+        executing_kick = self._current_state in (State.PASS, State.SCORE)
+        gt_fast = (
+            w.ball_velocity_from_gt and np.linalg.norm(w.ball_velocity[:2]) > 0.5
+        )
+
+        if vision_fast or (executing_kick and gt_fast):
+            self._ball_kick_speed_streak += 1
+        else:
+            self._ball_kick_speed_streak = 0
+
+    def _update_post_strike_kick_watch(self) -> None:
+        """After pass/score path completes, set has_kicked once the ball actually leaves contact.
+
+        Path completion coincides with walking through the last waypoint, not with the ball
+        having been struck and separated; this watch bridges that gap using displacement or
+        horizontal speed while PLAY_ON.
         """
-        return np.linalg.norm(ball_velocity) > 0.5 # 0.5 m/s threshold
+        if not self._post_strike_ball_watch or self.has_kicked:
+            return
+        w = self.agent.world
+        if w.playmode != PlayModeEnum.PLAY_ON:
+            return
+        can_measure = w.is_ball_pos_updated or w.ball_velocity_from_gt
+        if not can_measure:
+            return
+        bp = self._ball_xy_for_metrics()
+        d = float(np.linalg.norm(bp - self._post_strike_ball_xy_ref))
+        vxy = float(np.linalg.norm(w.ball_velocity[:2]))
+        if d >= _POST_STRIKE_BALL_DISP_MIN_M or vxy >= _POST_STRIKE_BALL_SPEED_MIN_MS:
+            self._arm_kick_detection()
+            self._post_strike_ball_watch = False
+
+    def _ball_xy_for_metrics(self) -> np.ndarray:
+        """Ball XY source for test metrics: prefer simulator ground truth position when available."""
+        w = self.agent.world
+        if w.ball_pos_from_gt:
+            return w.ball_pos_gt[:2]
+        return w.ball_pos[:2]
+
+    def _arm_kick_detection(self) -> None:
+        """Transition to post-kick monitoring, resetting stop debouncing state."""
+        if self.has_kicked:
+            return
+        self.has_kicked = True
+        self._kick_arm_ball_xy = self._ball_xy_for_metrics().copy()
+        self._post_kick_seen_fast = False
+        self._post_kick_max_disp_m = 0.0
+        self._ball_stop_stable_frames = 0
 
     def _get_beam_pose(self, random_poses: bool):
         """
@@ -794,3 +1074,71 @@ class DecisionMaker:
         else:
             logger.warning("Agent has no default pose defined; falling back to origin.")
             return (0.0, 0.0, 0.0)
+
+
+# --------------------------------------------------
+# Testing Helpers
+# --------------------------------------------------
+
+def _commanded_pd_torques_nm(robot) -> dict[str, float]:
+    """
+    Commanded actuator torque (Nm) from the PD rule used by the simulator:
+
+        tau = kp * (q_cmd - q) + kd * (dq_cmd - dq) + tau_ff
+
+    Perception and motor effector messages use joint angle/velocity in degrees;
+    the server converts q, dq to radians before applying gains.
+
+    This matches the client's motor-command path, not a direct read of mjData.qfrc_*;
+    use for test 5B-style caps on commanded torque.
+    """
+    torques: dict[str, float] = {}
+    for name in robot.ROBOT_MOTORS:
+        t = robot.motor_targets[name]
+        q_cmd = math.radians(t["target_position"])
+        dq_cmd = 0.0
+        tau_ff = 0.0
+        q_deg = robot.motor_positions.get(name, 0.0)
+        dq_deg = robot.motor_speeds.get(name, 0.0)
+        q = math.radians(q_deg)
+        dq = math.radians(dq_deg)
+        kp, kd = t["kp"], t["kd"]
+        torques[name] = kp * (q_cmd - q) + kd * (dq_cmd - dq) + tau_ff
+    return torques
+
+def _load_joint_limits_from_robot_xml() -> dict[str, tuple[float, float]]:
+    """Hinge joint (deg) limits from the ant robot model — same source as verification/conftest.py."""
+    base = Path(__file__).resolve().parent
+    candidates = [
+        base.parent.parent / "rcssservermj" / "src" / "rcsssmj" / "resources" / "robots" / "ant" / "robot.xml",
+        base.parent.parent / "RCSSServerMJ" / "src" / "rcsssmj" / "resources" / "robots" / "ant" / "robot.xml",
+    ]
+    robot_xml_path = next((p for p in candidates if p.is_file()), None)
+    if robot_xml_path is None:
+        raise FileNotFoundError(
+            "Could not locate ant robot.xml for joint limit checks. Tried: "
+            + ", ".join(str(p) for p in candidates)
+        )
+
+    root = ET.parse(robot_xml_path).getroot()
+    limits: dict[str, tuple[float, float]] = {}
+    for joint in root.findall(".//joint[@type='hinge'][@range]"):
+        name = joint.attrib.get("name")
+        range_str = joint.attrib.get("range", "")
+        if not name:
+            continue
+        parts = range_str.split()
+        if len(parts) != 2:
+            continue
+        lo, hi = float(parts[0]), float(parts[1])
+        limits[name] = (lo, hi)
+
+    if not limits:
+        raise ValueError(f"No hinge joint limits found in {robot_xml_path}")
+    return limits
+
+def _hinge_joint_limits() -> dict[str, tuple[float, float]]:
+    global _joint_limits_cache
+    if _joint_limits_cache is None:
+        _joint_limits_cache = _load_joint_limits_from_robot_xml()
+    return _joint_limits_cache

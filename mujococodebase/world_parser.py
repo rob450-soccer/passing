@@ -206,7 +206,11 @@ class WorldParser:
         robot.accelerometer = np.array(perception_dict["ACC"]["a"])
 
         world.is_ball_pos_updated = False
+        world.ball_pos_from_gt = False
+        world.ball_velocity_from_gt = False
         world.ball_velocity = np.zeros(3)
+        world.ball_velocity_vision = np.zeros(3)
+        world.mj_leg_actuator_torque_peak_nm = None
 
         # Vision parse
         if 'See' in perception_dict:
@@ -228,6 +232,7 @@ class WorldParser:
                     world.is_ball_pos_updated = True
                     if dt is not None and dt > 1e-6:
                         world.ball_velocity = (world.ball_pos - previous_ball_pos) / dt
+                        world.ball_velocity_vision = world.ball_velocity.copy()
                 
                 elif obj_type == "P":
                     
@@ -264,6 +269,44 @@ class WorldParser:
                         landmark_id=obj_type,
                         landmark_pos=polar_coords
                     )
+
+        # Simulator ground-truth ball linear velocity (m/s), if the server publishes (ballGT ...).
+        if "ballGT" in perception_dict:
+            gt = perception_dict["ballGT"]
+            if isinstance(gt, list):
+                gt = gt[-1]
+            if isinstance(gt, dict):
+                pos = gt.get("pos")
+                if isinstance(pos, list) and len(pos) >= 3:
+                    try:
+                        world.ball_pos_gt = np.array(
+                            [float(pos[0]), float(pos[1]), float(pos[2])],
+                            dtype=np.float64,
+                        )
+                        world.ball_pos_from_gt = True
+                    except (TypeError, ValueError):
+                        pass
+                vel = gt.get("vel")
+                if isinstance(vel, list) and len(vel) >= 3:
+                    world.ball_velocity = np.array(
+                        [float(vel[0]), float(vel[1]), float(vel[2])],
+                        dtype=np.float64,
+                    )
+                    world.ball_velocity_from_gt = True
+
+        # MuJoCo leg motor torque peak (Nm) from simulator (tauGT), if published.
+        if "tauGT" in perception_dict:
+            tg = perception_dict["tauGT"]
+            if isinstance(tg, list):
+                tg = tg[-1]
+            if isinstance(tg, dict) and "peak" in tg:
+                try:
+                    pk = tg["peak"]
+                    if isinstance(pk, (list, tuple)) and len(pk) >= 1:
+                        pk = pk[0]
+                    world.mj_leg_actuator_torque_peak_nm = float(pk)
+                except (TypeError, ValueError):
+                    pass
 
     def __sexpression_to_dict(self, sexpression: str) -> dict:
         """

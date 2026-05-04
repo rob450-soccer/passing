@@ -10,3 +10,5 @@ poetry.toml
 **/log/
 *.spec
 dist/
+**/data/
+**/logs/
