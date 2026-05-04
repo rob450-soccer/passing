@@ -16,6 +16,7 @@ Example:  BALL_STOP_DEBUG=1 python3 test5.py
 
 import ast
 import datetime
+import glob
 import json
 import math
 import os
@@ -166,7 +167,7 @@ def run_test():
     logger = util.setup_test_logging("test5")
     logger.info("Test 5 — two-robot passing (Parts A/B/C)")
 
-    total_trials = 5 # 100
+    total_trials = 100
     passed_a = passed_b = passed_c = 0
     trial_errors_m: list[float] = []
     trial_max_torque: list[float] = []
@@ -200,15 +201,7 @@ def run_test():
             player_processes = []
 
             try:
-                server_process, _thr = util.popen_with_logged_output(
-                    ["hatch", "run", "rcssservermj"],
-                    cwd=RCSSSMJ_DIR,
-                    logger=logger,
-                    label="server",
-                    start_new_session=True,
-                    env={**os.environ, "RESET_BALL_ON_KICKOFF": "0"},
-                )
-                time.sleep(3)
+                server_process = util.start_server(logger)
 
                 p1 = spawn_player(1, passer_xy[0], passer_xy[1])
                 player_processes.append(p1)
@@ -427,6 +420,19 @@ def run_test():
             logger.info(f"Saved kick-length histogram: {kick_len_plot_path}")
     except ImportError:
         logger.info("matplotlib not installed; skipped plots.")
+
+    # upload logs to Google Drive (use --include so rclone applies the pattern; shell * is unreliable)
+    logs_dir = os.path.join(TESTS_DIR, "logs")
+    rclone_dest = f"google_drive:/rob450-data/Verification/{TEST_DRIVE_FOLDER}"
+    if subprocess.run(
+        ["rclone", "copy", logs_dir, rclone_dest, "--include", "*.log", "--progress"],
+    ).returncode != 0:
+        logger.error("Failed to upload logs to Google Drive")
+    else:
+        logger.info(f"Uploaded logs to Google Drive at rob450-data/Verification/{TEST_DRIVE_FOLDER}/")
+        for path in glob.glob(os.path.join(logs_dir, "*.log")):
+            os.remove(path)
+        logger.info(f"Deleted local logs from {logs_dir}")
 
     sys.exit(exit_code)
 

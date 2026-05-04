@@ -39,7 +39,7 @@ class Utils:
                 "hatch",
                 "run",
                 "rcssservermj",
-                # "--no-render",
+                "--no-render",
                 # "--rerun",
                 # "record",
                 # "--rerunfile",
